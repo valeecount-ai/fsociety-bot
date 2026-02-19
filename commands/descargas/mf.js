@@ -1,4 +1,4 @@
-// mediafire.js (ESM)
+// mf.js (ESM) - Comando .mf / .mediafire
 // npm i axios
 import fs from "fs";
 import path from "path";
@@ -109,9 +109,7 @@ function vipValido(senderId, data) {
 
 // ================== API CONFIG ==================
 const APIKEY = "dvyer";
-
-// ⚠️ Pon aquí TU endpoint real (la ruta que ya usas en tu bot)
-const API_URL = "https://api-adonix.ultraplus.click/METETU_ENDPOINT_AQUI";
+const API_URL = "https://api-adonix.ultraplus.click/download/mediafire";
 
 // ================== COMMAND ==================
 export default {
@@ -151,16 +149,16 @@ export default {
         );
       }
 
-      // ✅ Llamada a tu API (AUTH con apikey)
+      // ✅ Llamada a tu API (GET /download/mediafire?apikey=...&url=...)
       const { data: res } = await axios.get(API_URL, {
-        params: { apikey: APIKEY, url }, // ✅ AQUÍ VA apikey
+        params: { apikey: APIKEY, url },
         timeout: 30000,
       });
 
       if (!res?.status || !res?.result?.link) {
         return sock.sendMessage(
           from,
-          { text: `❌ La API no devolvió link válido.\n${res?.error ? `🧩 Error: ${res.error}` : ""}` },
+          { text: `❌ La API no devolvió link válido.${res?.error ? `\n🧩 Error: ${res.error}` : ""}` },
           { quoted: msg }
         );
       }
@@ -196,12 +194,11 @@ export default {
         vipFooter;
 
       return sock.sendMessage(from, { text: out }, { quoted: msg });
-
     } catch (e) {
       console.error("[MF] Error:", e?.response?.data || e?.message || e);
       return sock.sendMessage(
         from,
-        { text: "❌ Error en MediaFire. Revisa consola / endpoint / apikey." },
+        { text: `❌ Error API:\n${typeof (e?.response?.data) === "object" ? JSON.stringify(e.response.data) : (e?.message || "Error")}` },
         { quoted: msg }
       );
     }

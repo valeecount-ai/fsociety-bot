@@ -1,7 +1,7 @@
 import yts from "yt-search";
 
 // ✅ Config
-const TTL_MS = 20 * 1000; // 20 segundos
+const TTL_MS = 40 * 1000; // 40 segundos
 const CLEAN_INTERVAL_MS = 1000; // limpia cada 1s
 
 // Guardar búsqueda por "chat + usuario"
@@ -180,7 +180,7 @@ export default {
           lastSearchByKey.delete(key);
           return await sock.sendMessage(
             from,
-            { text: "⏳ Tu búsqueda expiró (20s). Haz otra: *.play <texto>*" },
+            { text: "⏳ Tu búsqueda expiró (40s). Haz otra: *.play <texto>*" },
             { quoted: msg }
           );
         }

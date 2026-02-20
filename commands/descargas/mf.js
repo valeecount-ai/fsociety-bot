@@ -2,7 +2,7 @@ import axios from "axios";
 
 const API_KEY = "dvyer";
 const API_URL = "https://api-adonix.ultraplus.click/download/mediafire";
-const MAX_MB = 300;
+const MAX_MB = 800;
 
 export default {
   command: ["mediafire", "mf"],

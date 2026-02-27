@@ -1,9 +1,9 @@
-import axios from 'axios'; // Asegúrate de tener axios instalado
-import yts from 'yt-search';  // Asegúrate de tener yt-search instalado
+import axios from 'axios';  // Necesitas instalar axios usando `npm install axios`
+import yts from 'yt-search';  // Necesitas instalar yt-search usando `npm install yt-search`
 import fs from 'fs';
 import path from 'path';
 
-const API_KEY = 'DvYer159'; // Tu nueva API Key
+const API_KEY = 'DvYer159'; // Tu API Key
 const TMP_DIR = path.join(process.cwd(), 'ytmp4');
 if (!fs.existsSync(TMP_DIR)) {
   fs.mkdirSync(TMP_DIR, { recursive: true });
@@ -37,6 +37,8 @@ export default {
       const video = search.videos[0];
       const videoUrl = video.url;  // URL del video de YouTube
 
+      console.log("URL del video encontrado:", videoUrl); // Depuración: Verificar la URL del video
+
       // 1) Obtener el enlace de descarga en calidad 360p
       const resolveResponse = await axios.post(
         'https://api-sky.ultraplus.click/youtube-mp4/resolve',
@@ -53,10 +55,17 @@ export default {
         }
       );
 
+      // Depuración: Verificar la respuesta completa de la API
+      console.log("Respuesta de la API:", resolveResponse.data);
+
+      // Aquí obtenemos el enlace de descarga directo
       const downloadUrl = resolveResponse.data?.media?.dl_download;
       if (!downloadUrl) {
         throw new Error('No se pudo obtener el enlace de descarga');
       }
+
+      // Imprimir el enlace de descarga directo
+      console.log('Enlace de descarga:', downloadUrl);
 
       // 2) Descargar el archivo
       const videoFilePath = path.join(TMP_DIR, 'video_360p.mp4');

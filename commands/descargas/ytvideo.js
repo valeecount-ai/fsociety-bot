@@ -3,9 +3,10 @@ import yts from "yt-search";
 
 const API_URL = "https://nexevo-api.vercel.app/download/y2";
 const COOLDOWN_TIME = 15000;
-const MAX_BYTES = 80 * 1024 * 1024; // 80MB seguro para WhatsApp
+const MAX_BYTES = 85 * 1024 * 1024; // 85MB seguro
 
 const cooldowns = new Map();
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 export default {
   command: ["ytmp4"],
@@ -16,9 +17,10 @@ export default {
     const msg = ctx.m || ctx.msg || null;
     const messageKey = msg?.key || null;
 
-    const userId = from;
     const now = Date.now();
+    const userId = from;
 
+    // 🔒 Cooldown
     const cooldown = cooldowns.get(userId);
     if (cooldown && cooldown > now) {
       return sock.sendMessage(from, {
@@ -32,23 +34,26 @@ export default {
         cooldowns.delete(userId);
         return sock.sendMessage(from, {
           text:
-            "❌ Uso:\n" +
-            ".ytmp4 https://youtube.com/...\n" +
-            "o\n" +
-            ".ytmp4 nombre del video",
+            "❌ Uso correcto:\n\n" +
+            "• .ytmp4 https://youtube.com/...\n" +
+            "• .ytmp4 nombre del video",
         });
       }
 
       if (messageKey) {
-        await sock.sendMessage(from, { react: { text: "⏳", key: messageKey } });
+        await sock.sendMessage(from, {
+          react: { text: "⏳", key: messageKey },
+        });
       }
 
-      let query = args.join(" ");
+      let query = args.join(" ").trim();
       let videoUrl = query;
 
+      // 🔎 Si no es link, buscar
       if (!/^https?:\/\//i.test(query)) {
         const search = await yts(query);
-        if (!search.videos.length) throw new Error("Sin resultados");
+        if (!search?.videos?.length)
+          throw new Error("No se encontraron resultados.");
         videoUrl = search.videos[0].url;
       }
 
@@ -59,29 +64,40 @@ export default {
       );
 
       if (!data?.status || !data?.result?.url) {
-        throw new Error("API inválida");
+        throw new Error("La API no devolvió un video válido.");
       }
 
       const mp4Url = data.result.url;
 
-      // 🚀 Descargar como BUFFER
-      const videoRes = await axios.get(mp4Url, {
-        responseType: "arraybuffer",
+      // 🚀 Descargar como STREAM con headers tipo navegador
+      const videoResponse = await axios.get(mp4Url, {
+        responseType: "stream",
         timeout: 120000,
-        headers: { "User-Agent": "Mozilla/5.0" },
+        maxRedirects: 5,
+        headers: {
+          "User-Agent": "Mozilla/5.0",
+          "Accept": "*/*",
+          "Connection": "keep-alive",
+        },
       });
 
-      const buffer = Buffer.from(videoRes.data);
+      const contentLength = Number(
+        videoResponse.headers["content-length"] || 0
+      );
 
-      if (buffer.length > MAX_BYTES) {
-        throw new Error("El video supera el límite permitido (80MB).");
+      if (contentLength && contentLength > MAX_BYTES) {
+        throw new Error(
+          `El video pesa ${Math.ceil(
+            contentLength / (1024 * 1024)
+          )}MB y supera el límite permitido.`
+        );
       }
 
-      // 📤 Enviar buffer
+      // 📤 Enviar stream directo
       await sock.sendMessage(
         from,
         {
-          video: buffer,
+          video: videoResponse.data,
           mimetype: "video/mp4",
           caption: `🎬 Calidad: ${data.result.quality || "360p"}`,
         },
@@ -89,15 +105,19 @@ export default {
       );
 
       if (messageKey) {
-        await sock.sendMessage(from, { react: { text: "✅", key: messageKey } });
+        await sock.sendMessage(from, {
+          react: { text: "✅", key: messageKey },
+        });
       }
 
     } catch (err) {
-      console.error("YTMP4 ERROR:", err?.message);
+      console.error("YTMP4 ERROR:", err?.message || err);
       cooldowns.delete(userId);
 
       await sock.sendMessage(from, {
-        text: `❌ Error:\n${err?.message || "No se pudo descargar el video."}`,
+        text:
+          "❌ Error al descargar el video.\n\n" +
+          (err?.message || "Intenta nuevamente."),
       });
     }
   },

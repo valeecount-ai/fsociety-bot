@@ -6,14 +6,15 @@ import { pipeline } from "stream/promises";
 
 const API_URL = "https://nexevo-api.vercel.app/download/y2";
 const TMP_DIR = path.join(process.cwd(), "tmp");
+const MAX_MB = 90;
 const COOLDOWN_TIME = 15000;
-const MAX_MB = 85;
 
 if (!fs.existsSync(TMP_DIR)) {
   fs.mkdirSync(TMP_DIR, { recursive: true });
 }
 
 const cooldowns = new Map();
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 export default {
   command: ["ytmp4"],
@@ -64,7 +65,7 @@ export default {
         videoUrl = search.videos[0].url;
       }
 
-      // 🔥 Llamada API
+      // 🔥 API
       const { data } = await axios.get(
         `${API_URL}?url=${encodeURIComponent(videoUrl)}`,
         { timeout: 25000 }
@@ -76,10 +77,10 @@ export default {
 
       const mp4Url = data.result.url;
 
-      // 📥 Descargar COMPLETO antes de enviar
+      // 📥 Descargar completo
       const response = await axios.get(mp4Url, {
         responseType: "stream",
-        timeout: 120000,
+        timeout: 180000,
         maxRedirects: 5,
         headers: {
           "User-Agent": "Mozilla/5.0",
@@ -89,25 +90,29 @@ export default {
 
       filePath = path.join(TMP_DIR, `${Date.now()}.mp4`);
 
-      await pipeline(response.data, fs.createWriteStream(filePath));
+      const writer = fs.createWriteStream(filePath);
+      await pipeline(response.data, writer);
 
-      // ✅ Verificar tamaño real
+      // 🔍 Verificar tamaño real
       const stats = fs.statSync(filePath);
       const sizeMB = stats.size / (1024 * 1024);
 
       if (sizeMB < 1) {
-        throw new Error("Archivo descargado está incompleto.");
+        throw new Error("Archivo incompleto.");
       }
 
       if (sizeMB > MAX_MB) {
         throw new Error(`El video pesa ${sizeMB.toFixed(1)}MB y supera ${MAX_MB}MB.`);
       }
 
-      // 📤 Enviar archivo ya cerrado
+      // ⏳ pequeña espera para asegurar cierre total
+      await sleep(2000);
+
+      // 📤 Enviar usando URL LOCAL (más estable que buffer)
       await sock.sendMessage(
         from,
         {
-          video: fs.readFileSync(filePath),
+          video: { url: filePath },
           mimetype: "video/mp4",
           caption: `🎬 Calidad: ${data.result.quality || "360p"}`,
         },
@@ -120,6 +125,9 @@ export default {
         });
       }
 
+      // ⏳ esperar antes de borrar
+      await sleep(3000);
+
     } catch (err) {
       console.error("YTMP4 ERROR:", err?.message || err);
       cooldowns.delete(userId);
@@ -129,7 +137,7 @@ export default {
       });
 
     } finally {
-      // 🧹 BORRAR ARCHIVO DESPUÉS DE ENVIAR
+      // 🧹 limpiar archivo
       try {
         if (filePath && fs.existsSync(filePath)) {
           fs.unlinkSync(filePath);

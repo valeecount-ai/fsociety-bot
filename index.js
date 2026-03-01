@@ -35,7 +35,7 @@ global.channelInfo = settings.newsletter?.enabled
   : {};
 
 // Carpeta TMP para descargas
-const TMP_DIR = path.join(__dirname, "TMP");
+const TMP_DIR = path.join(process.cwd(), "tmp");
 
 // Readline
 const rl = readline.createInterface({ input: process.stdin, output: process.stdout });

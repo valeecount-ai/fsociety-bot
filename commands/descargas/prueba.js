@@ -1,136 +1,138 @@
-import axios from 'axios';  // Asegúrate de tener axios instalado
-import yts from 'yt-search';  // Asegúrate de tener yt-search instalado
-import fs from 'fs';
-import path from 'path';
+import fetch from 'node-fetch'
+import yts from 'yt-search'
+import sharp from 'sharp'
+import { getBuffer } from '../lib/message.js'
 
-const API_KEY = 'DvYer159';  // Tu nueva API Key
-const TMP_DIR = path.join(process.cwd(), 'ytmp4');
-if (!fs.existsSync(TMP_DIR)) {
-  fs.mkdirSync(TMP_DIR, { recursive: true });
+const isYTUrl = (text) =>
+  /^(https?:\/\/)?(www\.)?(youtube\.com|youtu\.be)\/.+$/i.test(text)
+
+const cleanYoutubeUrl = (input) => {
+  try {
+    const u = new URL(input)
+
+    // youtu.be/ID
+    if (u.hostname.includes('youtu.be')) {
+      const id = u.pathname.replace('/', '')
+      return `https://youtube.com/watch?v=${id}`
+    }
+
+    // youtube.com/watch?v=ID
+    const v = u.searchParams.get('v')
+    if (v) return `https://youtube.com/watch?v=${v}`
+
+    return input
+  } catch {
+    return input
+  }
 }
 
-const BASE_URL = 'https://api-sky.ultraplus.click';  // Base URL de la API
-
 export default {
-  command: ['ytmp1'],
-  category: 'descarga',
-
-  run: async (ctx) => {
-    const { sock, from, args } = ctx;
-    const msg = ctx.m || ctx.msg || null;
-
-    if (!args.length) {
-      return sock.sendMessage(from, {
-        text: "❌ Uso: .ytmp1 <link o nombre del video>",
-        ...global.channelInfo,
-      });
-    }
-
-    let query = args.join(' ');  // Obtenemos el nombre o el link del video
-    let videoUrl = query;
-
+  command: ['yta', 'ytmp3', 'playaudio', 'mp3'],
+  category: 'downloader',
+  run: async (client, m, args) => {
     try {
-      // Si no es link, hacer búsqueda con yt-search
-      if (!/^https?:\/\//i.test(query)) {
-        const search = await yts(query);
-        if (!search.videos.length) {
-          throw new Error('No se encontró el video');
-        }
-        videoUrl = search.videos[0].url;
+      if (!args[0]) {
+        return m.reply('🎧 *Shizuka AI:*\n> Escribe el nombre o link del video para descargar el audio.')
       }
 
-      // 1) Obtener las opciones de calidad del video
-      const optionsResponse = await axios.post(
-        `${BASE_URL}/youtube-mp4`,
-        { url: videoUrl },
-        {
-          headers: {
-            'Content-Type': 'application/json',
-            'apikey': API_KEY,
-          },
-        }
-      );
+      const query = args.join(' ')
+      let url, meta
 
-      console.log("Opciones de calidad:", optionsResponse.data);
-
-      // Verificar si la respuesta tiene las opciones de calidad
-      const videoOptions = optionsResponse.data?.result?.options?.video;
-      if (!videoOptions || !videoOptions.find(opt => opt.label === '360p')) {
-        throw new Error('No se encontró la calidad 360p');
+      if (!isYTUrl(query)) {
+        const s = await yts(query)
+        if (!s.all?.length) return m.reply('🥀 No encontré resultados.')
+        meta = s.all[0]
+        url = meta.url
+      } else {
+        url = cleanYoutubeUrl(query)
+        // sacar metadata por videoId (más estable)
+        const videoId = (() => {
+          try {
+            const u = new URL(url)
+            return u.searchParams.get('v')
+          } catch { return null }
+        })()
+        meta = videoId ? await yts({ videoId }) : null
       }
 
-      // 2) Obtener el enlace de descarga en calidad 360p
-      const resolveResponse = await axios.post(
-        `${BASE_URL}/youtube-mp4/resolve`,
+      const title = meta?.title || 'YouTube Audio'
+      const thumbUrl = meta?.image || meta?.thumbnail
+      const channel = meta?.author?.name || 'YouTube'
+      const duration = meta?.timestamp || meta?.duration?.timestamp || 'N/A'
+      const views = (meta?.views || 0).toLocaleString()
+
+      let thumbBuffer = null
+      if (thumbUrl) thumbBuffer = await getBuffer(thumbUrl)
+
+      // Mensaje informativo
+      let info = `🎧 *Descargando audio*\n\n`
+      info += `• 🏷️ *Título:* ${title}\n`
+      info += `• 🎙️ *Canal:* ${channel}\n`
+      info += `• ⏳ *Duración:* ${duration}\n`
+      info += `• 👀 *Vistas:* ${views}\n\n`
+      info += `> ⏳ Espera un momento...`
+
+      if (thumbBuffer) {
+        await client.sendMessage(m.chat, { image: thumbBuffer, caption: info }, { quoted: m })
+      } else {
+        await m.reply(info)
+      }
+
+      // ✅ API VREDEN (AUDIO)
+      const apiUrl =
+        `https://api.vreden.my.id/api/v1/download/youtube/audio?` +
+        `url=${encodeURIComponent(url)}&quality=128`
+
+      const res = await fetch(apiUrl, {
+        headers: { 'accept': 'application/json' }
+      })
+      const json = await res.json()
+
+      // Validación de API
+      if (!json?.status || !json?.result) {
+        return m.reply('🥀 La API no respondió como se esperaba. Intenta otra vez.')
+      }
+
+      // Si la API trae "download.status=false" como tu ejemplo
+      if (json.result?.download && json.result.download.status === false) {
+        const msg = json.result.download.message || 'Converting error'
+        return m.reply(`🥀 No se pudo convertir el audio.\n> Motivo: *${msg}*\n\nPrueba con otro video o intenta más tarde.`)
+      }
+
+      // Algunas APIs devuelven el link en distintas llaves: intenta varias
+      const dl =
+        json.result?.download?.url ||
+        json.result?.download_url ||
+        json.result?.url ||
+        json.result?.download?.link
+
+      if (!dl) {
+        return m.reply('🥀 No encontré el link de descarga en la respuesta de la API.')
+      }
+
+      // Descargar el MP3 como buffer
+      const audioBuffer = await getBuffer(dl)
+
+      // Thumbnail para WhatsApp (si existe)
+      let jpegThumb = null
+      if (thumbBuffer) {
+        jpegThumb = await sharp(thumbBuffer).resize(300, 300).jpeg({ quality: 80 }).toBuffer()
+      }
+
+      await client.sendMessage(
+        m.chat,
         {
-          url: videoUrl,
-          type: 'video',
-          quality: '360',
+          audio: audioBuffer,
+          mimetype: 'audio/mpeg',
+          fileName: `${title}.mp3`,
+          jpegThumbnail: jpegThumb || undefined,
+          ptt: false
         },
-        {
-          headers: {
-            'Content-Type': 'application/json',
-            'apikey': API_KEY,
-          },
-        }
-      );
-
-      console.log("Respuesta de /resolve:", resolveResponse.data);
-
-      const rel = resolveResponse.data?.result?.media?.dl_download;
-      if (!rel) throw new Error('No se encontró enlace de descarga');
-
-      // Construir la URL completa usando la URL base
-      const downloadUrl = BASE_URL + rel;
-      console.log('Enlace de descarga:', downloadUrl);  // Depuración: Verificar el enlace de descarga completo
-
-      // 3) Descargar el archivo con redirección y User-Agent
-      const videoFilePath = path.join(TMP_DIR, 'video_360p.mp4');
-      const writer = fs.createWriteStream(videoFilePath);
-
-      // Usamos un User-Agent de navegador para simular una solicitud real
-      const headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-      };
-
-      const videoRes = await axios({
-        url: downloadUrl,  // Usamos la URL completa ahora
-        method: 'GET',
-        headers: headers,  // Usamos el encabezado User-Agent
-        responseType: 'stream',  // Nos aseguramos de que la respuesta sea un stream
-        maxRedirects: 5  // Permitimos que siga hasta 5 redirecciones si es necesario
-      });
-
-      videoRes.data.pipe(writer);
-
-      // Cuando el archivo se haya descargado
-      writer.on('finish', async () => {
-        await sock.sendMessage(
-          from,
-          {
-            video: fs.readFileSync(videoFilePath),
-            mimetype: 'video/mp4',
-            caption: `🎬 Video descargado en 360p`,
-            ...global.channelInfo,
-          },
-          msg?.key ? { quoted: msg } : undefined
-        );
-
-        // Eliminar el archivo temporal después de enviarlo
-        fs.unlinkSync(videoFilePath);
-      });
-
-      writer.on('error', (err) => {
-        throw new Error('Error al guardar el archivo de video: ' + err.message);
-      });
-
-    } catch (err) {
-      console.error('❌ Error en YTMP1:', err);
-      await sock.sendMessage(
-        from,
-        { text: `❌ Error: ${err.message}` },
-        msg ? { quoted: msg } : undefined
-      );
+        { quoted: m }
+      )
+    } catch (e) {
+      console.error('YTMP3 Vreden Error:', e)
+      await m.reply('🥀 *Shizuka AI:*\n> Error inesperado al descargar el audio.')
     }
   }
-};
+}

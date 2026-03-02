@@ -4,7 +4,7 @@ import axios from "axios";
 const COOLDOWN_TIME = 10 * 1000;
 const cooldowns = new Map();
 
-const BORDER = "⭐════════════════════════⭐";
+const BORDER = "════════════════════════";
 const LINE = "❒════════════════════════";
 
 const NEXEVO_API = "https://nexevo.onrender.com/download/tiktok?url=";
@@ -67,7 +67,7 @@ export default {
   run: async ({ sock, from, args, settings, m, msg }) => {
     const quoted = (m?.key || msg?.key) ? { quoted: (m || msg) } : undefined;
     const channelContext = global.channelInfo || {};
-    const BOT_NAME = settings?.botName || "DVYER";
+    const BOT_NAME = settings?.botName || "⺪ArtoriaBoT 乂​";
 
     // 🔒 COOLDOWN
     const userId = from;

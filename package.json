@@ -7,7 +7,7 @@
     "start": "node index.js"
   },
   "dependencies": {
-    "@whiskeysockets/baileys": "6.17.16",
+    "@whiskeysockets/baileys": "6.7.21",
     "axios": "^1.6.0",
     "chalk": "^4.1.2",
     "figlet": "^1.9.3",

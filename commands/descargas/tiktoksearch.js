@@ -45,18 +45,7 @@ export default {
           `💧 *Con marca:* ${v.wmplay}\n\n`;
       });
 
-      text += `✅ Tip: copia el link "Sin marca" para verlo/descargarlo en tu navegador.\n`;
-
-      // Enviar solo texto (y opcional: miniatura del primer resultado)
-      const firstCover = results[0]?.cover;
-
-      if (firstCover) {
-        return sock.sendMessage(
-          from,
-          { image: { url: firstCover }, caption: text, ...global.channelInfo },
-          { quoted: msg }
-        );
-      }
+      text += `✅ (TikWM bloquea miniaturas con Cloudflare, por eso no envío el cover)\n`;
 
       return sock.sendMessage(from, { text, ...global.channelInfo }, { quoted: msg });
     } catch (e) {

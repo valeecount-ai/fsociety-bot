@@ -5,7 +5,24 @@ import yts from "yt-search";
 import { exec } from "child_process";
 
 const API_URL = "https://mayapi.ooguy.com/ytdl";
-const API_KEY = "may-a709a21d";
+
+// 🔁 ROTACIÓN DE API KEYS
+const API_KEYS = [
+  "may-a709a21",
+  "may-d19c45b2",
+  "may-08988cc0",
+  "may-ddfb7860",
+  "may-ea9fd2d2",
+  "may-9030a982"
+];
+
+let apiIndex = 0;
+
+function getNextApiKey() {
+  const key = API_KEYS[apiIndex];
+  apiIndex = (apiIndex + 1) % API_KEYS.length;
+  return key;
+}
 
 const COOLDOWN_TIME = 10 * 1000;
 const TMP_DIR = path.join(process.cwd(), "tmp");
@@ -29,25 +46,38 @@ function isHttpUrl(s) {
   return /^https?:\/\//i.test(String(s || ""));
 }
 
-// Obtener link directo desde la API
+// 🔁 FUNCIÓN MODIFICADA SOLO PARA ROTACIÓN
 async function fetchDirectMediaUrl({ videoUrl }) {
-  const { data } = await axios.get(API_URL, {
-    timeout: 20000,
-    params: {
-      url: videoUrl,
-      quality: "360p",
-      apikey: API_KEY,
-    },
-  });
+  let lastError = null;
 
-  if (!data?.status || !data?.result?.url) {
-    throw new Error("API inválida");
+  for (let i = 0; i < API_KEYS.length; i++) {
+    const currentKey = getNextApiKey();
+
+    try {
+      const { data } = await axios.get(API_URL, {
+        timeout: 20000,
+        params: {
+          url: videoUrl,
+          quality: "360p",
+          apikey: currentKey,
+        },
+      });
+
+      if (data?.status && data?.result?.url) {
+        return {
+          title: data?.result?.title || "audio",
+          directUrl: data.result.url,
+        };
+      }
+
+      lastError = new Error("API inválida");
+
+    } catch (err) {
+      lastError = err;
+    }
   }
 
-  return {
-    title: data?.result?.title || "audio",
-    directUrl: data.result.url,
-  };
+  throw new Error(lastError?.message || "Todas las API Keys fallaron.");
 }
 
 // Convertir a MP3 con ffmpeg
@@ -87,8 +117,7 @@ export default {
       if (!args?.length) {
         cooldowns.delete(userId);
         return sock.sendMessage(from, {
-          text: "❌ Uso: .play <nombre o link>",
-          text: "❌ Uso: .ytmp3 <nombre o link>",
+          text: "❌ Uso: .play <nombre o link>\n❌ Uso: .ytmp3 <nombre o link>",
           ...global.channelInfo,
         });
       }

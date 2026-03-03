@@ -279,7 +279,7 @@ async function sendByFile(sock, from, quoted, filePath, title, size) {
 }
 
 export default {
-  command: ["ytmp4"],
+  command: ["ytmp4", "yt2", "ytmp4doc"],
   category: "descarga",
 
   run: async (ctx) => {

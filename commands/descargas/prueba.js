@@ -3,76 +3,90 @@ import path from "path";
 import yts from "yt-search";
 import ytdlp from "yt-dlp-exec";
 
-const TMP_DIR = "./tmp";
+const TMP_DIR = path.join(process.cwd(), "tmp");
 
 if (!fs.existsSync(TMP_DIR)) {
   fs.mkdirSync(TMP_DIR, { recursive: true });
 }
 
+const channelInfo = global.channelInfo || {};
+
+function safeFileName(name) {
+  return String(name || "video")
+    .replace(/[\\/:*?"<>|]/g, "")
+    .slice(0, 80);
+}
+
 export default {
 
-  command: ["ytplay","play"],
+  command: ["play","ytplay"],
   category: "descarga",
 
   run: async (ctx) => {
 
     const { sock, from, args } = ctx;
     const msg = ctx.m || ctx.msg;
-
     const quoted = msg?.key ? { quoted: msg } : undefined;
 
-    if (!args.length) {
-      return sock.sendMessage(from,{
-        text:"❌ Uso: .play <nombre del video>"
-      },quoted);
-    }
-
     try {
+
+      if (!args.length) {
+        return sock.sendMessage(from,{
+          text:"❌ Uso: .play <nombre del video>",
+          ...channelInfo
+        },quoted);
+      }
 
       const query = args.join(" ");
 
       await sock.sendMessage(from,{
-        text:"🔎 Buscando en YouTube..."
+        text:`🔎 Buscando:\n${query}`,
+        ...channelInfo
       },quoted);
 
       const search = await yts(query);
-
       const video = search.videos[0];
 
       if (!video) {
         return sock.sendMessage(from,{
-          text:"❌ No se encontró el video"
+          text:"❌ No se encontró el video",
+          ...channelInfo
         },quoted);
       }
 
-      const title = video.title.replace(/[\\/:*?"<>|]/g,"");
+      const title = safeFileName(video.title);
       const url = video.url;
 
-      const file = path.join(TMP_DIR, `${Date.now()}.mp4`);
+      const filePath = path.join(TMP_DIR, `${Date.now()}.mp4`);
 
       await sock.sendMessage(from,{
-        text:`⬇️ Descargando:\n🎬 ${title}`
+        text:`⬇️ Descargando...\n🎬 ${title}`,
+        ...channelInfo
       },quoted);
 
       await ytdlp(url,{
         format:"mp4",
-        output:file
+        output:filePath
       });
 
       await sock.sendMessage(from,{
-        video:{ url:file },
+        video:{ url:filePath },
         mimetype:"video/mp4",
-        caption:`🎬 ${title}`
+        caption:`🎬 ${title}`,
+        ...channelInfo
       },quoted);
 
-      fs.unlinkSync(file);
+      if(fs.existsSync(filePath)){
+        fs.unlinkSync(filePath);
+      }
 
     } catch(err){
 
-      console.log("YTPLAY ERROR:",err);
+      console.error("PLAY ERROR:",err);
 
       await sock.sendMessage(from,{
-        text:"❌ Error al descargar el video"
+        text:"❌ Error descargando el video",
+        ...channelInfo
       });
 
     }

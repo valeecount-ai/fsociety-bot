@@ -1,13 +1,8 @@
+
 import fs from "fs";
 import path from "path";
 import axios from "axios";
 import yts from "yt-search";
-import { exec } from "child_process";
-
-const API_LIST = [
-"https://api.agatz.xyz/api/ytmp3",
-"https://api.neoxr.eu/api/youtube/audio"
-];
 
 const TMP_DIR = path.join(process.cwd(),"tmp");
 
@@ -20,50 +15,17 @@ return String(name||"audio")
 .slice(0,80)
 }
 
-async function searchVideo(query){
+async function getAudioFromPiped(videoId){
 
-const res = await yts(query);
-
-if(!res.videos.length) return null;
-
-return res.videos[0];
-
-}
-
-async function getAudio(url){
-
-for(const api of API_LIST){
-
-try{
-
-const {data} = await axios.get(api,{
-params:{url}
+const {data} = await axios.get(`https://piped.video/api/v1/streams/${videoId}`,{
+timeout:20000
 });
 
-if(data?.data?.url)
-return data.data.url;
+const audio = data?.audioStreams?.find(v=>v.codec?.includes("opus"));
 
-}catch{}
+if(!audio) throw new Error("No audio stream");
 
-}
-
-throw new Error("No se pudo obtener audio");
-
-}
-
-function convert(input,output){
-
-return new Promise((resolve,reject)=>{
-
-const cmd = `ffmpeg -y -i "${input}" -vn -ar 44100 -ac 2 -b:a 128k "${output}"`;
-
-exec(cmd,(err)=>{
-if(err) reject(err);
-else resolve();
-});
-
-});
-
+return audio.url;
 }
 
 export default {
@@ -76,30 +38,36 @@ run: async(ctx)=>{
 const {sock,from,args} = ctx;
 const msg = ctx.m || ctx.msg;
 
-if(!args.length)
-return sock.sendMessage(from,{text:"❌ Uso: .play canción"});
+if(!args.length){
+return sock.sendMessage(from,{
+text:"❌ Uso: .play canción"
+});
+}
 
 let tempFile;
-let finalFile;
 
 try{
 
 const query = args.join(" ");
 
-const video = await searchVideo(query);
+const search = await yts(query);
 
-if(!video)
+const video = search.videos[0];
+
+if(!video){
 return sock.sendMessage(from,{text:"❌ No encontré resultados"});
+}
 
 await sock.sendMessage(from,{
 image:{url:video.thumbnail},
-caption:`🎵 Descargando\n\n${video.title}`
+caption:`🎵 Descargando...\n\n${video.title}`
 },{quoted:msg});
 
-const audioUrl = await getAudio(video.url);
+const videoId = video.url.split("v=")[1];
 
-tempFile = path.join(TMP_DIR,Date.now()+".mp4");
-finalFile = path.join(TMP_DIR,Date.now()+".mp3");
+const audioUrl = await getAudioFromPiped(videoId);
+
+tempFile = path.join(TMP_DIR,Date.now()+".webm");
 
 const res = await axios({
 url:audioUrl,
@@ -113,26 +81,25 @@ res.data.pipe(writer);
 
 await new Promise(r=>writer.on("finish",r));
 
-await convert(tempFile,finalFile);
-
 await sock.sendMessage(from,{
-audio:{url:finalFile},
-mimetype:"audio/mpeg",
-fileName:safeFileName(video.title)+".mp3"
+audio:{url:tempFile},
+mimetype:"audio/webm",
+fileName:safeFileName(video.title)+".webm"
 },{quoted:msg});
 
-}catch(e){
+}catch(err){
 
-console.log("PLAY ERROR:",e);
+console.log("PLAY ERROR:",err);
 
 sock.sendMessage(from,{
-text:"❌ Error al descargar música"
+text:"❌ Error descargando música"
 });
 
 }finally{
 
-try{if(tempFile)fs.unlinkSync(tempFile)}catch{}
-try{if(finalFile)fs.unlinkSync(finalFile)}catch{}
+setTimeout(()=>{
+try{ if(tempFile && fs.existsSync(tempFile)) fs.unlinkSync(tempFile) }catch{}
+},10000)
 
 }
 

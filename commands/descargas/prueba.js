@@ -1,7 +1,7 @@
 import axios from "axios";
 import yts from "yt-search";
 
-const API = "https://0f66da8bd81e5d32-201-230-121-168.serveousercontent.com//ytmp4";
+const API = "https://0f80537128db9987-201-230-121-168.serveousercontent.com/ytmp4";
 
 const channelInfo = global.channelInfo || {};
 
@@ -31,9 +31,7 @@ text:"❌ Uso: .ytmp3yer canción",
 try{
 
 const query = args.join(" ");
-
 const search = await yts(query);
-
 const video = search.videos[0];
 
 if(!video){
@@ -50,18 +48,22 @@ caption:`🎵 Descargando...\n\n${video.title}`,
 },{quoted:msg});
 
 const {data} = await axios.get(API,{
-params:{url:video.url},
-timeout:20000
+params:{url:video.url}
 });
 
-if(!data?.download){
-throw new Error("API sin audio");
-}
+if(!data?.download) throw new Error("API sin audio");
 
 const audioUrl = data.download;
 
+const audioBuffer = await axios.get(audioUrl,{
+responseType:"arraybuffer",
+headers:{
+"User-Agent":"Mozilla/5.0"
+}
+});
+
 await sock.sendMessage(from,{
-audio:{ url: audioUrl },
+audio: audioBuffer.data,
 mimetype:"audio/mpeg",
 fileName:safeFileName(video.title)+".mp3",
 ...channelInfo

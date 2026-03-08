@@ -24,7 +24,7 @@ const msg = ctx.m || ctx.msg
 
 if(!args.length){
 return sock.sendMessage(from,{
-text:"❌ Uso: .play canción\nEjemplo:\n.play bad bunny",
+text:"❌ Uso: .play canción\nEjemplo:\n.play ozuna",
 ...channelInfo
 })
 }
@@ -45,17 +45,14 @@ text:"❌ No encontré resultados",
 }
 
 await sock.sendMessage(from,{
-image:{url: video.thumbnail},
+image:{url:video.thumbnail},
 caption:`🎵 *${video.title}*\n⏱️ ${video.timestamp}\n\n⬇️ Descargando audio...`,
 ...channelInfo
-},{quoted: msg})
+},{quoted:msg})
 
-// llamar a tu API
 const apiUrl = `${API}?url=${encodeURIComponent(video.url)}`
 
-const {data} = await axios.get(apiUrl,{
-timeout:20000
-})
+const {data} = await axios.get(apiUrl,{timeout:20000})
 
 if(!data || !data.download){
 throw new Error("API sin audio")
@@ -63,23 +60,33 @@ throw new Error("API sin audio")
 
 const audioUrl = data.download
 
-// descargar audio para evitar 403
-const audioData = await axios.get(audioUrl,{
+// descargar audio con headers
+const audioRes = await axios({
+method:"GET",
+url:audioUrl,
 responseType:"arraybuffer",
+headers:{
+"User-Agent":"Mozilla/5.0",
+"Accept":"*/*",
+"Connection":"keep-alive"
+},
 timeout:30000
 })
 
-// enviar audio como buffer
+if(!audioRes.data){
+throw new Error("Audio vacío")
+}
+
 await sock.sendMessage(from,{
-audio: Buffer.from(audioData.data),
+audio: Buffer.from(audioRes.data),
 mimetype:"audio/mpeg",
 fileName: safeFileName(video.title)+".mp3",
 ...channelInfo
-},{quoted: msg})
+},{quoted:msg})
 
 }catch(err){
 
-console.log("PLAY ERROR:", err?.response?.data || err.message)
+console.log("[LOG] PLAY ERROR:", err?.response?.data || err.message)
 
 await sock.sendMessage(from,{
 text:"❌ Error descargando música",
@@ -91,4 +98,5 @@ text:"❌ Error descargando música",
 }
 
 }
+
 

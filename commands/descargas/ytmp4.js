@@ -1,4 +1,9 @@
 import axios from "axios";
+import ffmpegStatic from "ffmpeg-static";
+import { spawn } from "node:child_process";
+import { mkdtemp, rm, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 
 const API_BASE = "https://dv-yer-api.online";
 const API_VIDEO_URL = `${API_BASE}/ytdlmp4`;
@@ -6,6 +11,10 @@ const API_SEARCH_URL = `${API_BASE}/ytsearch`;
 
 const COOLDOWN_TIME = 15 * 1000;
 const VIDEO_QUALITY = "360p";
+const API_TIMEOUT_MS = 35000;
+const FFMPEG_TIMEOUT_MS = 7 * 60 * 1000;
+
+const FFMPEG_BIN = process.env.FFMPEG_PATH || ffmpegStatic;
 const cooldowns = new Map();
 
 function safeFileName(name) {
@@ -63,7 +72,7 @@ function pickMediaUrl(data) {
   );
 }
 
-async function apiGet(url, params, timeout = 35000) {
+async function apiGet(url, params, timeout = API_TIMEOUT_MS) {
   const response = await axios.get(url, {
     timeout,
     params,
@@ -87,9 +96,7 @@ async function resolveSearch(query) {
   const data = await apiGet(API_SEARCH_URL, { q: query, limit: 1 }, 25000);
   const first = data?.results?.[0];
 
-  if (!first?.url) {
-    throw new Error("No se encontró el video.");
-  }
+  if (!first?.url) throw new Error("No se encontró el video.");
 
   return {
     videoUrl: first.url,
@@ -105,7 +112,7 @@ async function resolveRedirectTarget(url) {
     let response;
     try {
       response = await axios.get(url, {
-        timeout: 35000,
+        timeout: API_TIMEOUT_MS,
         maxRedirects: 0,
         responseType: "stream",
         validateStatus: () => true,
@@ -146,22 +153,16 @@ async function requestVideoLink(videoUrl) {
         url: videoUrl,
       });
 
-      const rawUrl = pickMediaUrl(data);
-      const mediaUrl = toAbsoluteApiUrl(rawUrl);
-
-      if (!mediaUrl) {
-        throw new Error("La API no devolvió stream_url/download_url.");
-      }
-
-      let directUrl = mediaUrl;
+      let mediaUrl = toAbsoluteApiUrl(pickMediaUrl(data));
+      if (!mediaUrl) throw new Error("La API no devolvió stream_url/download_url.");
 
       if (/\/download\/redirect\//i.test(mediaUrl)) {
-        directUrl = await resolveRedirectTarget(mediaUrl);
+        mediaUrl = await resolveRedirectTarget(mediaUrl);
       }
 
       return {
         title: safeFileName(data?.title || data?.result?.title || "video"),
-        directUrl,
+        mediaUrl,
       };
     } catch (error) {
       lastError = error?.message || "Error desconocido";
@@ -172,12 +173,113 @@ async function requestVideoLink(videoUrl) {
   throw new Error(lastError);
 }
 
-async function sendVideoByUrl(sock, from, quoted, { directUrl, title }) {
+function runFfmpeg(args, timeoutMs = FFMPEG_TIMEOUT_MS) {
+  return new Promise((resolve, reject) => {
+    if (!FFMPEG_BIN) {
+      reject(new Error("FFmpeg no encontrado. Instala ffmpeg o define FFMPEG_PATH."));
+      return;
+    }
+
+    const proc = spawn(FFMPEG_BIN, args, { windowsHide: true });
+    let stderr = "";
+
+    const timer = setTimeout(() => {
+      proc.kill("SIGKILL");
+      reject(new Error("FFmpeg excedió el tiempo límite."));
+    }, timeoutMs);
+
+    proc.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+
+    proc.on("error", (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+
+    proc.on("close", (code) => {
+      clearTimeout(timer);
+      if (code === 0) return resolve();
+      reject(new Error(stderr.trim() || `FFmpeg terminó con código ${code}`));
+    });
+  });
+}
+
+async function transcodeToPlayableMp4(inputUrl, outputPath) {
+  const remuxArgs = [
+    "-y",
+    "-hide_banner",
+    "-loglevel",
+    "error",
+    "-i",
+    inputUrl,
+    "-map",
+    "0:v:0",
+    "-map",
+    "0:a:0?",
+    "-c",
+    "copy",
+    "-movflags",
+    "+faststart",
+    outputPath,
+  ];
+
+  try {
+    await runFfmpeg(remuxArgs);
+    return;
+  } catch (_) {
+    // fallback abajo
+  }
+
+  const transcodeArgs = [
+    "-y",
+    "-hide_banner",
+    "-loglevel",
+    "error",
+    "-i",
+    inputUrl,
+    "-map",
+    "0:v:0",
+    "-map",
+    "0:a:0?",
+    "-c:v",
+    "libx264",
+    "-preset",
+    "veryfast",
+    "-crf",
+    "24",
+    "-c:a",
+    "aac",
+    "-b:a",
+    "128k",
+    "-movflags",
+    "+faststart",
+    outputPath,
+  ];
+
+  await runFfmpeg(transcodeArgs);
+}
+
+async function buildPlayableVideoFile({ mediaUrl, title }) {
+  const tempDir = await mkdtemp(path.join(tmpdir(), "ytmp4-"));
+  const outputPath = path.join(tempDir, `${safeFileName(title)}.mp4`);
+
+  await transcodeToPlayableMp4(mediaUrl, outputPath);
+
+  const fileInfo = await stat(outputPath);
+  if (!fileInfo.size || fileInfo.size < 120 * 1024) {
+    throw new Error("FFmpeg generó un archivo inválido o vacío.");
+  }
+
+  return { tempDir, outputPath };
+}
+
+async function sendVideoByPath(sock, from, quoted, { filePath, title }) {
   try {
     await sock.sendMessage(
       from,
       {
-        video: { url: directUrl },
+        video: { url: filePath },
         mimetype: "video/mp4",
         caption: `🎬 ${title}`,
         ...global.channelInfo,
@@ -186,12 +288,12 @@ async function sendVideoByUrl(sock, from, quoted, { directUrl, title }) {
     );
     return "video";
   } catch (e1) {
-    console.error("send video by url failed:", e1?.message || e1);
+    console.error("send video file failed:", e1?.message || e1);
 
     await sock.sendMessage(
       from,
       {
-        document: { url: directUrl },
+        document: { url: filePath },
         mimetype: "video/mp4",
         fileName: `${title}.mp4`,
         caption: `📄 Enviado como documento\n🎬 ${title}`,
@@ -223,6 +325,8 @@ export default {
 
     cooldowns.set(userId, Date.now() + COOLDOWN_TIME);
 
+    let tempDir = null;
+
     try {
       if (!args?.length) {
         cooldowns.delete(userId);
@@ -249,11 +353,11 @@ export default {
         thumbnail
           ? {
               image: { url: thumbnail },
-              caption: `⬇️ Preparando video...\n\n🎬 ${title}\n🎚️ Calidad: ${VIDEO_QUALITY}`,
+              caption: `⬇️ Preparando video...\n\n🎬 ${title}\n🎚️ Calidad: ${VIDEO_QUALITY}\n⚙️ Procesando con FFmpeg...`,
               ...global.channelInfo,
             }
           : {
-              text: `⬇️ Preparando video...\n\n🎬 ${title}\n🎚️ Calidad: ${VIDEO_QUALITY}`,
+              text: `⬇️ Preparando video...\n\n🎬 ${title}\n🎚️ Calidad: ${VIDEO_QUALITY}\n⚙️ Procesando con FFmpeg...`,
               ...global.channelInfo,
             },
         quoted
@@ -262,8 +366,15 @@ export default {
       const info = await requestVideoLink(videoUrl);
       title = safeFileName(info.title || title);
 
-      await sendVideoByUrl(sock, from, quoted, {
-        directUrl: info.directUrl,
+      const built = await buildPlayableVideoFile({
+        mediaUrl: info.mediaUrl,
+        title,
+      });
+
+      tempDir = built.tempDir;
+
+      await sendVideoByPath(sock, from, quoted, {
+        filePath: built.outputPath,
         title,
       });
     } catch (err) {
@@ -274,8 +385,11 @@ export default {
         text: `❌ ${String(err?.message || "Error al procesar el video.")}`,
         ...global.channelInfo,
       });
+    } finally {
+      if (tempDir) {
+        await rm(tempDir, { recursive: true, force: true }).catch(() => {});
+      }
     }
   },
 };
-
 

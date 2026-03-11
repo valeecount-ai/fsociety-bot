@@ -1,8 +1,8 @@
 import axios from "axios";
 
 const API_BASE = "https://dv-yer-api.online";
-const API_VIDEO_URL = ${API_BASE}/ytmp4;
-const API_SEARCH_URL = ${API_BASE}/ytsearch;
+const API_VIDEO_URL = `${API_BASE}/ytmp4`;
+const API_SEARCH_URL = `${API_BASE}/ytsearch`;
 
 const COOLDOWN_TIME = 15 * 1000;
 const VIDEO_QUALITY = "360p";
@@ -35,7 +35,7 @@ function extractApiError(data, status) {
     data?.detail ||
     data?.error?.message ||
     data?.message ||
-    (status ? HTTP ${status} : "Error de API")
+    (status ? `HTTP ${status}` : "Error de API")
   );
 }
 
@@ -155,7 +155,7 @@ async function sendVideoByUrl(sock, from, quoted, { directUrl, title }) {
       {
         video: { url: directUrl },
         mimetype: "video/mp4",
-        caption: 🎬 ${title},
+        caption: `🎬 ${title}`,
         ...global.channelInfo,
       },
       quoted
@@ -169,8 +169,8 @@ async function sendVideoByUrl(sock, from, quoted, { directUrl, title }) {
       {
         document: { url: directUrl },
         mimetype: "video/mp4",
-        fileName: ${title}.mp4,
-        caption: 📄 Enviado como documento\n🎬 ${title},
+        fileName: `${title}.mp4`,
+        caption: `📄 Enviado como documento\n🎬 ${title}`,
         ...global.channelInfo,
       },
       quoted
@@ -192,7 +192,7 @@ export default {
     const until = cooldowns.get(userId);
     if (until && until > Date.now()) {
       return sock.sendMessage(from, {
-        text: ⏳ Espera ${getCooldownRemaining(until)}s,
+        text: `⏳ Espera ${getCooldownRemaining(until)}s`,
         ...global.channelInfo,
       });
     }
@@ -225,11 +225,11 @@ export default {
         thumbnail
           ? {
               image: { url: thumbnail },
-              caption: ⬇️ Preparando video...\n\n🎬 ${title}\n🎚️ Calidad: ${VIDEO_QUALITY},
+              caption: `⬇️ Preparando video...\n\n🎬 ${title}\n🎚️ Calidad: ${VIDEO_QUALITY}`,
               ...global.channelInfo,
             }
           : {
-              text: ⬇️ Preparando video...\n\n🎬 ${title}\n🎚️ Calidad: ${VIDEO_QUALITY},
+              text: `⬇️ Preparando video...\n\n🎬 ${title}\n🎚️ Calidad: ${VIDEO_QUALITY}`,
               ...global.channelInfo,
             },
         quoted
@@ -247,7 +247,7 @@ export default {
       cooldowns.delete(userId);
 
       await sock.sendMessage(from, {
-        text: ❌ ${String(err?.message || "Error al procesar el video.")},
+        text: `❌ ${String(err?.message || "Error al procesar el video.")}`,
         ...global.channelInfo,
       });
     }

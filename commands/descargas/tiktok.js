@@ -1,4 +1,8 @@
+import fs from "fs";
+import path from "path";
+import os from "os";
 import axios from "axios";
+import { pipeline } from "stream/promises";
 
 const API_BASE = "https://dv-yer-api.online";
 const API_TIKTOK_URL = `${API_BASE}/ttdlmp4`;
@@ -6,9 +10,15 @@ const API_TIKTOK_URL = `${API_BASE}/ttdlmp4`;
 const COOLDOWN_TIME = 15 * 1000;
 const VIDEO_QUALITY = "hd";
 const API_LANG = "es";
-const REQUEST_TIMEOUT = 35000;
+const REQUEST_TIMEOUT = 60000;
+const MAX_VIDEO_BYTES = 80 * 1024 * 1024;
 
 const cooldowns = new Map();
+const TMP_DIR = path.join(os.tmpdir(), "dvyer-tiktok");
+
+if (!fs.existsSync(TMP_DIR)) {
+  fs.mkdirSync(TMP_DIR, { recursive: true });
+}
 
 function safeFileName(name) {
   return (
@@ -186,12 +196,58 @@ async function requestTikTokLink(videoUrl) {
   throw new Error(lastError);
 }
 
-async function sendTikTokVideo(sock, from, quoted, { directUrl, title, fileName }) {
+async function downloadVideoToTemp(directUrl, fileName) {
+  const finalName = normalizeMp4Name(fileName || "tiktok.mp4");
+  const tempPath = path.join(TMP_DIR, `${Date.now()}-${finalName}`);
+
+  const response = await axios.get(directUrl, {
+    responseType: "stream",
+    timeout: REQUEST_TIMEOUT,
+    maxRedirects: 5,
+    headers: {
+      "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122 Safari/537.36",
+      Accept: "*/*",
+      Referer: "https://www.tiktok.com/",
+    },
+    validateStatus: (status) => status >= 200 && status < 400,
+  });
+
+  await pipeline(response.data, fs.createWriteStream(tempPath));
+
+  if (!fs.existsSync(tempPath)) {
+    throw new Error("No se pudo guardar el video.");
+  }
+
+  const size = fs.statSync(tempPath).size;
+
+  if (!size || size < 100000) {
+    try {
+      fs.unlinkSync(tempPath);
+    } catch {}
+    throw new Error("El archivo descargado es inválido.");
+  }
+
+  if (size > MAX_VIDEO_BYTES) {
+    try {
+      fs.unlinkSync(tempPath);
+    } catch {}
+    throw new Error("El video es demasiado grande para enviarlo por WhatsApp.");
+  }
+
+  return {
+    tempPath,
+    size,
+    fileName: finalName,
+  };
+}
+
+async function sendTikTokVideo(sock, from, quoted, { filePath, fileName, title }) {
   try {
     await sock.sendMessage(
       from,
       {
-        video: { url: directUrl },
+        video: { url: filePath },
         mimetype: "video/mp4",
         fileName,
         caption: `api dvyer\n\n${title}`,
@@ -201,12 +257,12 @@ async function sendTikTokVideo(sock, from, quoted, { directUrl, title, fileName 
     );
     return "video";
   } catch (e1) {
-    console.error("send video by url failed:", e1?.message || e1);
+    console.error("send local video failed:", e1?.message || e1);
 
     await sock.sendMessage(
       from,
       {
-        document: { url: directUrl },
+        document: { url: filePath },
         mimetype: "video/mp4",
         fileName,
         caption: `api dvyer\n\n${title}`,
@@ -227,6 +283,8 @@ export default {
     const msg = ctx.m || ctx.msg || null;
     const quoted = msg?.key ? { quoted: msg } : undefined;
     const userId = from;
+
+    let tempPath = null;
 
     const until = cooldowns.get(userId);
     if (until && until > Date.now()) {
@@ -260,10 +318,13 @@ export default {
 
       const info = await requestTikTokLink(videoUrl);
 
+      const downloaded = await downloadVideoToTemp(info.directUrl, info.fileName);
+      tempPath = downloaded.tempPath;
+
       await sendTikTokVideo(sock, from, quoted, {
-        directUrl: info.directUrl,
+        filePath: downloaded.tempPath,
+        fileName: downloaded.fileName,
         title: info.title,
-        fileName: info.fileName,
       });
     } catch (err) {
       console.error("TIKTOK ERROR:", err?.message || err);
@@ -273,7 +334,12 @@ export default {
         text: `❌ ${String(err?.message || "No se pudo procesar el video.")}`,
         ...global.channelInfo,
       });
+    } finally {
+      try {
+        if (tempPath && fs.existsSync(tempPath)) {
+          fs.unlinkSync(tempPath);
+        }
+      } catch {}
     }
   },
 };
-

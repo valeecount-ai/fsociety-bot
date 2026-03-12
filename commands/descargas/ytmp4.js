@@ -101,11 +101,6 @@ function extractApiError(data, status) {
   );
 }
 
-function withApiKey(params = {}) {
-  const apiKey = process.env.DVYER_API_KEY;
-  return apiKey ? { ...params, apikey: apiKey } : params;
-}
-
 function parseContentDispositionFileName(headerValue) {
   const text = String(headerValue || "");
   const utfMatch = text.match(/filename\*=UTF-8''([^;]+)/i);
@@ -140,7 +135,7 @@ async function readStreamToText(stream) {
 async function apiGet(url, params, timeout = 35000) {
   const response = await axios.get(url, {
     timeout,
-    params: withApiKey(params),
+    params,
     validateStatus: () => true,
   });
 
@@ -176,11 +171,11 @@ async function downloadVideoFromApi(videoUrl, outputPath) {
   const response = await axios.get(API_VIDEO_URL, {
     responseType: "stream",
     timeout: REQUEST_TIMEOUT,
-    params: withApiKey({
+    params: {
       mode: "file",
       quality: VIDEO_QUALITY,
       url: videoUrl,
-    }),
+    },
     validateStatus: () => true,
   });
 

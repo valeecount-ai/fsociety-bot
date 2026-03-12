@@ -39,6 +39,10 @@ const settings = JSON.parse(
   fs.readFileSync("./settings/settings.json", "utf-8")
 );
 
+if (settings?.apiKey) {
+  process.env.DVYER_API_KEY = String(settings.apiKey);
+}
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 

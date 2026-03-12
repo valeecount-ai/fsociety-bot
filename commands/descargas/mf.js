@@ -1,6 +1,5 @@
 import axios from "axios";
 
-const API_KEY = "dvyer";
 const API_URL = "https://api-adonix.ultraplus.click/download/mediafire";
 const MAX_MB = 800;
 
@@ -8,7 +7,7 @@ export default {
   command: ["mediafire", "mf"],
   category: "descarga",
 
-  run: async ({ sock, from, args }) => {
+  run: async ({ sock, from, args, settings }) => {
 
     try {
 
@@ -31,7 +30,8 @@ export default {
       });
 
       // 🔹 Consultar API
-      const api = `${API_URL}?apikey=${API_KEY}&url=${encodeURIComponent(url)}`;
+      const apiKey = settings?.apiKey || process.env.DVYER_API_KEY || "";
+      const api = `${API_URL}?apikey=${encodeURIComponent(apiKey)}&url=${encodeURIComponent(url)}`;
       const { data } = await axios.get(api);
 
       if (!data.status || !data.result?.link) {

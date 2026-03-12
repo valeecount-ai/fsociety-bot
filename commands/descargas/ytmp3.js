@@ -91,6 +91,11 @@ function extractApiError(data, status) {
   );
 }
 
+function withApiKey(params = {}) {
+  const apiKey = process.env.DVYER_API_KEY;
+  return apiKey ? { ...params, apikey: apiKey } : params;
+}
+
 async function readStreamToText(stream) {
   return await new Promise((resolve, reject) => {
     let data = "";
@@ -107,7 +112,7 @@ async function readStreamToText(stream) {
 async function apiGet(url, params, timeout = 35000) {
   const response = await axios.get(url, {
     timeout,
-    params,
+    params: withApiKey(params),
     validateStatus: () => true,
   });
 
@@ -143,11 +148,11 @@ async function downloadAudioFromApi(videoUrl, outputPath) {
   const response = await axios.get(API_AUDIO_URL, {
     responseType: "stream",
     timeout: REQUEST_TIMEOUT,
-    params: {
+    params: withApiKey({
       mode: "file",
       quality: AUDIO_QUALITY,
       url: videoUrl,
-    },
+    }),
     validateStatus: () => true,
   });
 

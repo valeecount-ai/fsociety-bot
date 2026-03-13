@@ -5,6 +5,13 @@
   "ownerNumbers": ["51907376960"],
   "ownerLids": ["88077330554979"],
   "botNumber": "524531461401",
+  "subbot": {
+    "enabled": true,
+    "label": "SUBBOT",
+    "name": "DVYER Subbot",
+    "authFolder": "dvyer-session-subbot",
+    "pairingNumber": ""
+  },
 
   "newsletter": {
     "enabled": true,

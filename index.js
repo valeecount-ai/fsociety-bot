@@ -1,5 +1,5 @@
 // =========================
-// DVYER BOT - INDEX (PAIRING STABLE)
+// DVYER BOT - INDEX (MULTI BOT)
 // =========================
 
 import * as baileys from "@whiskeysockets/baileys";
@@ -31,7 +31,8 @@ const {
 
 // ================= CONFIG =================
 
-const CARPETA_AUTH = "dvyer-session";
+const DEFAULT_AUTH_FOLDER = "dvyer-session";
+const DEFAULT_SUBBOT_AUTH_FOLDER = "dvyer-session-subbot";
 const logger = pino({ level: "silent" });
 const FIXED_BROWSER = ["Windows", "Chrome", "114.0.5735.198"];
 
@@ -58,10 +59,9 @@ global.channelInfo = settings?.newsletter?.enabled
     }
   : {};
 
-// ================= TMP / STORE =================
+// ================= TMP =================
 
 const TMP_DIR = path.join(process.cwd(), "tmp");
-const STORE_FILE = path.join(TMP_DIR, "baileys_store.json");
 
 try {
   if (!fs.existsSync(TMP_DIR)) {
@@ -73,124 +73,21 @@ process.env.TMPDIR = TMP_DIR;
 process.env.TMP = TMP_DIR;
 process.env.TEMP = TMP_DIR;
 
-// ================= VARIABLES =================
-
-let sockGlobal = null;
-let conectando = false;
-let pairingRequested = false;
-let reconnectTimer = null;
-
-const rl = readline.createInterface({
-  input: process.stdin,
-  output: process.stdout,
-});
-
-const preguntar = (q) => new Promise((r) => rl.question(q, r));
-const comandos = new Map();
-const groupCache = new Map();
-
-let totalMensajes = 0;
-let totalComandos = 0;
-
-const mensajesPorTipo = {
-  Grupo: 0,
-  Privado: 0,
-  Desconocido: 0,
-};
-
-const store =
-  typeof makeInMemoryStore === "function"
-    ? makeInMemoryStore({ logger })
-    : null;
-
-try {
-  if (store?.readFromFile && fs.existsSync(STORE_FILE)) {
-    store.readFromFile(STORE_FILE);
-  }
-} catch {}
-
-if (store?.writeToFile) {
-  setInterval(() => {
-    try {
-      store.writeToFile(STORE_FILE);
-    } catch {}
-  }, 10000).unref();
-}
-
-// ================= CONSOLA =================
-
-global.consoleBuffer = [];
-global.MAX_CONSOLE_LINES = 120;
-
-function pushConsole(level, args) {
-  const line =
-    `[${new Date().toLocaleString()}] [${level}] ` +
-    args
-      .map((a) => {
-        try {
-          if (a instanceof Error) return a.stack;
-          if (typeof a === "string") return a;
-          return JSON.stringify(a);
-        } catch {
-          return String(a);
-        }
-      })
-      .join(" ");
-
-  global.consoleBuffer.push(line);
-
-  if (global.consoleBuffer.length > global.MAX_CONSOLE_LINES) {
-    global.consoleBuffer.shift();
-  }
-}
-
-function shouldIgnoreError(value) {
-  const txt = String(value || "");
-  return (
-    txt.includes("Bad MAC") ||
-    txt.includes("SessionCipher") ||
-    txt.includes("Failed to decrypt message with any known session") ||
-    txt.includes("No session record") ||
-    txt.includes("Closing open session in favor of incoming prekey bundle")
-  );
-}
-
-const log = console.log;
-const warn = console.warn;
-const error = console.error;
-
-console.log = (...a) => {
-  pushConsole("LOG", a);
-  log(chalk.cyan("[LOG]"), ...a);
-};
-
-console.warn = (...a) => {
-  pushConsole("WARN", a);
-  warn(chalk.yellow("[WARN]"), ...a);
-};
-
-console.error = (...a) => {
-  if (shouldIgnoreError(a[0])) return;
-  pushConsole("ERROR", a);
-  error(chalk.red("[ERROR]"), ...a);
-};
-
-// ================= ANTI CRASH =================
-
-process.on("unhandledRejection", (reason) => {
-  if (shouldIgnoreError(reason)) return;
-  console.error(reason);
-});
-
-process.on("uncaughtException", (err) => {
-  if (shouldIgnoreError(err?.message || err)) return;
-  console.error(err);
-});
-
 // ================= UTIL =================
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function sanitizePhoneNumber(value) {
+  return String(value || "").replace(/\D/g, "");
+}
+
+function normalizeJidUser(value = "") {
+  const jid = String(value || "").trim();
+  if (!jid) return "";
+  const [user] = jid.split("@");
+  return user.split(":")[0];
 }
 
 function tipoChat(jid = "") {
@@ -300,10 +197,6 @@ function serializeMessage(raw) {
   };
 }
 
-function sanitizePhoneNumber(value) {
-  return String(value || "").replace(/\D/g, "");
-}
-
 async function getVersionSafe() {
   try {
     const data = await fetchLatestBaileysVersion();
@@ -313,15 +206,450 @@ async function getVersionSafe() {
   }
 }
 
-async function cachedGroupMetadata(jid) {
-  return groupCache.get(jid) || undefined;
+function buildOwnerIds(currentSettings) {
+  const ownerIds = new Set();
+
+  const add = (value) => {
+    const normalized = normalizeJidUser(value);
+    if (normalized) ownerIds.add(normalized);
+  };
+
+  add(currentSettings?.ownerNumber);
+
+  for (const value of currentSettings?.ownerNumbers || []) {
+    add(value);
+  }
+
+  for (const value of currentSettings?.ownerLids || []) {
+    add(value);
+  }
+
+  return ownerIds;
 }
 
-function scheduleReconnect(ms = 2500) {
-  if (reconnectTimer) clearTimeout(reconnectTimer);
-  reconnectTimer = setTimeout(() => {
-    reconnectTimer = null;
-    iniciarBot();
+function getConfiguredPrefixes(currentSettings) {
+  if (Array.isArray(currentSettings?.prefix)) {
+    return currentSettings.prefix
+      .map((prefix) => String(prefix || "").trim())
+      .filter(Boolean)
+      .sort((a, b) => b.length - a.length);
+  }
+
+  const prefix = String(currentSettings?.prefix || ".").trim();
+  return prefix ? [prefix] : [];
+}
+
+function extractCommandData(text, currentSettings) {
+  const normalizedText = String(text || "").trim();
+  if (!normalizedText) return null;
+
+  const prefix = getConfiguredPrefixes(currentSettings).find((value) =>
+    normalizedText.startsWith(value)
+  );
+
+  if (!prefix) return null;
+
+  const body = normalizedText.slice(prefix.length).trim();
+  if (!body) return null;
+
+  const args = body.split(/\s+/);
+  const commandName = String(args.shift() || "").toLowerCase();
+
+  if (!commandName) return null;
+
+  return {
+    prefix,
+    body,
+    args,
+    commandName,
+  };
+}
+
+function buildBotConfigs(currentSettings) {
+  const configs = [];
+
+  const mainAuthFolder =
+    String(currentSettings?.authFolder || DEFAULT_AUTH_FOLDER).trim() ||
+    DEFAULT_AUTH_FOLDER;
+
+  configs.push({
+    id: "main",
+    label: "MAIN",
+    displayName: String(currentSettings?.botName || "DVYER").trim() || "DVYER",
+    authFolder: mainAuthFolder,
+    pairingNumber:
+      sanitizePhoneNumber(currentSettings?.pairingNumber) ||
+      sanitizePhoneNumber(currentSettings?.botNumber) ||
+      sanitizePhoneNumber(currentSettings?.ownerNumber) ||
+      sanitizePhoneNumber(currentSettings?.ownerNumbers?.[0]) ||
+      "",
+  });
+
+  if (currentSettings?.subbot?.enabled) {
+    let subbotAuthFolder =
+      String(
+        currentSettings?.subbot?.authFolder || DEFAULT_SUBBOT_AUTH_FOLDER
+      ).trim() || DEFAULT_SUBBOT_AUTH_FOLDER;
+
+    if (subbotAuthFolder === mainAuthFolder) {
+      subbotAuthFolder = `${mainAuthFolder}-subbot`;
+    }
+
+    configs.push({
+      id: "subbot",
+      label:
+        String(currentSettings?.subbot?.label || "SUBBOT")
+          .trim()
+          .toUpperCase() || "SUBBOT",
+      displayName:
+        String(
+          currentSettings?.subbot?.name ||
+            `${currentSettings?.botName || "DVYER"} Subbot`
+        ).trim() || "DVYER Subbot",
+      authFolder: subbotAuthFolder,
+      pairingNumber:
+        sanitizePhoneNumber(currentSettings?.subbot?.pairingNumber) ||
+        sanitizePhoneNumber(currentSettings?.subbot?.botNumber) ||
+        "",
+    });
+  }
+
+  return configs;
+}
+
+const BOT_CONFIGS = buildBotConfigs(settings);
+const OWNER_IDS = buildOwnerIds(settings);
+
+// ================= ESTADO =================
+
+const rl = readline.createInterface({
+  input: process.stdin,
+  output: process.stdout,
+});
+
+const preguntar = (q) => new Promise((r) => rl.question(q, r));
+let promptBusy = false;
+
+async function preguntarSeguro(question) {
+  while (promptBusy) {
+    await delay(200);
+  }
+
+  promptBusy = true;
+
+  try {
+    return await preguntar(question);
+  } finally {
+    promptBusy = false;
+  }
+}
+
+const comandos = new Map();
+const commandModules = new Set();
+const botStates = new Map();
+
+let totalMensajes = 0;
+let totalComandos = 0;
+
+const mensajesPorTipo = {
+  Grupo: 0,
+  Privado: 0,
+  Desconocido: 0,
+};
+
+// ================= CONSOLA =================
+
+global.consoleBuffer = [];
+global.MAX_CONSOLE_LINES = 120;
+
+function pushConsole(level, args) {
+  const line =
+    `[${new Date().toLocaleString()}] [${level}] ` +
+    args
+      .map((value) => {
+        try {
+          if (value instanceof Error) return value.stack;
+          if (typeof value === "string") return value;
+          return JSON.stringify(value);
+        } catch {
+          return String(value);
+        }
+      })
+      .join(" ");
+
+  global.consoleBuffer.push(line);
+
+  if (global.consoleBuffer.length > global.MAX_CONSOLE_LINES) {
+    global.consoleBuffer.shift();
+  }
+}
+
+function shouldIgnoreError(value) {
+  const txt = String(value || "");
+  return (
+    txt.includes("Bad MAC") ||
+    txt.includes("SessionCipher") ||
+    txt.includes("Failed to decrypt message with any known session") ||
+    txt.includes("No session record") ||
+    txt.includes("Closing open session in favor of incoming prekey bundle")
+  );
+}
+
+const log = console.log;
+const warn = console.warn;
+const error = console.error;
+
+console.log = (...args) => {
+  pushConsole("LOG", args);
+  log(chalk.cyan("[LOG]"), ...args);
+};
+
+console.warn = (...args) => {
+  pushConsole("WARN", args);
+  warn(chalk.yellow("[WARN]"), ...args);
+};
+
+console.error = (...args) => {
+  if (shouldIgnoreError(args[0])) return;
+  pushConsole("ERROR", args);
+  error(chalk.red("[ERROR]"), ...args);
+};
+
+// ================= ANTI CRASH =================
+
+process.on("unhandledRejection", (reason) => {
+  if (shouldIgnoreError(reason)) return;
+  console.error(reason);
+});
+
+process.on("uncaughtException", (err) => {
+  if (shouldIgnoreError(err?.message || err)) return;
+  console.error(err);
+});
+
+// ================= HELPERS BOT =================
+
+function getBotTag(value) {
+  const config = value?.config || value;
+  const label = String(config?.label || "BOT").trim() || "BOT";
+  return `[${label}]`;
+}
+
+function createStoreForBot(botId) {
+  if (typeof makeInMemoryStore !== "function") return null;
+
+  const store = makeInMemoryStore({ logger });
+  const storeFile = path.join(TMP_DIR, `baileys_store_${botId}.json`);
+
+  try {
+    if (store?.readFromFile && fs.existsSync(storeFile)) {
+      store.readFromFile(storeFile);
+    }
+  } catch {}
+
+  if (store?.writeToFile) {
+    const timer = setInterval(() => {
+      try {
+        store.writeToFile(storeFile);
+      } catch {}
+    }, 10000);
+
+    timer.unref?.();
+    store.__writeTimer = timer;
+  }
+
+  return store;
+}
+
+function ensureBotState(config) {
+  const existing = botStates.get(config.id);
+  if (existing) return existing;
+
+  const state = {
+    config,
+    sock: null,
+    authState: null,
+    connecting: false,
+    pairingRequested: false,
+    reconnectTimer: null,
+    groupCache: new Map(),
+    store: createStoreForBot(config.id),
+  };
+
+  botStates.set(config.id, state);
+  return state;
+}
+
+function cachedGroupMetadata(botState, jid) {
+  return botState.groupCache.get(jid) || undefined;
+}
+
+function getQuoteOptions(message) {
+  return message?.key ? { quoted: message } : undefined;
+}
+
+function isBotRegistered(botState) {
+  return Boolean(botState?.authState?.creds?.registered);
+}
+
+function createBaseContext(botState, sock, message, extra = {}) {
+  return {
+    sock,
+    m: message,
+    msg: message,
+    from: message.from,
+    chat: message.from,
+    sender: message.sender,
+    isGroup: message.isGroup,
+    esGrupo: message.isGroup,
+    text: message.text,
+    body: message.body,
+    quoted: message.quoted,
+    settings,
+    comandos,
+    botId: botState.config.id,
+    botLabel: botState.config.label,
+    botName: botState.config.displayName,
+    ...extra,
+  };
+}
+
+async function getMessageExecutionInfo(botState, sock, message) {
+  const senderId = normalizeJidUser(message.sender);
+  const esOwner = OWNER_IDS.has(senderId);
+  const info = {
+    esOwner,
+    isOwner: esOwner,
+    esAdmin: false,
+    isAdmin: false,
+    esBotAdmin: false,
+    isBotAdmin: false,
+    groupMetadata: null,
+  };
+
+  if (!message.isGroup) {
+    return info;
+  }
+
+  let metadata = cachedGroupMetadata(botState, message.from);
+
+  if (!metadata) {
+    try {
+      metadata = await sock.groupMetadata(message.from);
+      botState.groupCache.set(message.from, metadata);
+    } catch {}
+  }
+
+  if (!metadata) {
+    return info;
+  }
+
+  const participants = Array.isArray(metadata.participants)
+    ? metadata.participants
+    : [];
+
+  const participant = participants.find(
+    (value) => normalizeJidUser(value?.id) === senderId
+  );
+  const botParticipant = participants.find(
+    (value) => normalizeJidUser(value?.id) === normalizeJidUser(sock?.user?.id)
+  );
+
+  const esAdmin = Boolean(participant?.admin);
+  const esBotAdmin = Boolean(botParticipant?.admin);
+
+  return {
+    ...info,
+    esAdmin,
+    isAdmin: esAdmin,
+    esBotAdmin,
+    isBotAdmin: esBotAdmin,
+    groupMetadata: metadata,
+  };
+}
+
+async function runMessageHooks(botState, context) {
+  for (const cmd of commandModules) {
+    if (typeof cmd?.onMessage !== "function") continue;
+
+    try {
+      const blocked = await cmd.onMessage(context);
+      if (blocked) return true;
+    } catch (err) {
+      console.error(`${getBotTag(botState)} Error onMessage:`, err);
+    }
+  }
+
+  return false;
+}
+
+async function runGroupUpdateHooks(botState, sock, update) {
+  for (const cmd of commandModules) {
+    if (typeof cmd?.onGroupUpdate !== "function") continue;
+
+    try {
+      await cmd.onGroupUpdate({
+        sock,
+        update,
+        settings,
+        comandos,
+        botId: botState.config.id,
+        botLabel: botState.config.label,
+        botName: botState.config.displayName,
+      });
+    } catch (err) {
+      console.error(`${getBotTag(botState)} Error onGroupUpdate:`, err);
+    }
+  }
+}
+
+async function canRunCommand(cmd, context) {
+  const quoted = getQuoteOptions(context.msg);
+
+  if (cmd?.groupOnly && !context.esGrupo) {
+    await context.sock.sendMessage(
+      context.from,
+      {
+        text: "Este comando solo funciona en grupos.",
+        ...global.channelInfo,
+      },
+      quoted
+    );
+    return false;
+  }
+
+  if (cmd?.adminOnly && !context.esOwner && !context.esAdmin) {
+    await context.sock.sendMessage(
+      context.from,
+      {
+        text: "Solo los administradores o el owner pueden usar este comando.",
+        ...global.channelInfo,
+      },
+      quoted
+    );
+    return false;
+  }
+
+  if (cmd?.botAdminOnly && context.esGrupo && !context.esBotAdmin) {
+    await context.sock.sendMessage(
+      context.from,
+      {
+        text: "Necesito ser administrador para usar este comando.",
+        ...global.channelInfo,
+      },
+      quoted
+    );
+    return false;
+  }
+
+  return true;
+}
+
+function scheduleReconnect(botState, ms = 2500) {
+  if (botState.reconnectTimer) clearTimeout(botState.reconnectTimer);
+  botState.reconnectTimer = setTimeout(() => {
+    botState.reconnectTimer = null;
+    iniciarInstanciaBot(botState.config);
   }, ms);
 }
 
@@ -332,9 +660,9 @@ function banner() {
 
   console.log(
     chalk.magentaBright(`
-╔══════════════════════════════╗
-║        DVYER BOT v2          ║
-╚══════════════════════════════╝
++------------------------------+
+|        DVYER BOT v2          |
++------------------------------+
 `)
   );
 
@@ -342,12 +670,14 @@ function banner() {
     chalk.green("Owner :"),
     settings.ownerName,
     chalk.blue("\nPrefijo :"),
-    settings.prefix,
+    Array.isArray(settings.prefix) ? settings.prefix.join(", ") : settings.prefix,
     chalk.yellow("\nComandos cargados :"),
-    comandos.size
+    comandos.size,
+    chalk.magenta("\nBots activos :"),
+    BOT_CONFIGS.map((cfg) => cfg.label).join(", ")
   );
 
-  console.log(chalk.gray("──────────────────────────────"));
+  console.log(chalk.gray("------------------------------"));
 }
 
 // ================= CARGAR COMANDOS =================
@@ -358,21 +688,23 @@ async function cargarComandos() {
   async function leer(dir) {
     const archivos = fs.readdirSync(dir, { withFileTypes: true });
 
-    for (const a of archivos) {
-      const ruta = path.join(dir, a.name);
+    for (const archivo of archivos) {
+      const ruta = path.join(dir, archivo.name);
 
-      if (a.isDirectory()) {
+      if (archivo.isDirectory()) {
         await leer(ruta);
         continue;
       }
 
-      if (!a.name.endsWith(".js")) continue;
+      if (!archivo.name.endsWith(".js")) continue;
 
       try {
         const mod = await import(pathToFileURL(ruta).href);
         const cmd = mod.default;
 
         if (!cmd || typeof cmd.run !== "function") continue;
+
+        commandModules.add(cmd);
 
         const nombres = [];
 
@@ -383,13 +715,13 @@ async function cargarComandos() {
           else nombres.push(cmd.command);
         }
 
-        for (const n of nombres) {
-          comandos.set(String(n).toLowerCase(), cmd);
+        for (const nombre of nombres) {
+          comandos.set(String(nombre).toLowerCase(), cmd);
         }
 
-        console.log("✓ Comando cargado:", nombres.join(", "));
-      } catch (e) {
-        console.error("Error cargando comando:", ruta, e);
+        console.log("Comando cargado:", nombres.join(", "));
+      } catch (err) {
+        console.error("Error cargando comando:", ruta, err);
       }
     }
   }
@@ -399,38 +731,41 @@ async function cargarComandos() {
 
 // ================= PAIRING =================
 
-async function requestPairingCodeSafe(sock) {
-  if (pairingRequested || sock.authState?.creds?.registered) return;
+async function requestPairingCodeSafe(botState) {
+  const { sock, config } = botState;
+  if (!sock) return;
+  if (botState.pairingRequested || isBotRegistered(botState)) return;
 
-  pairingRequested = true;
+  botState.pairingRequested = true;
 
   try {
-    const configuredNumber =
-      sanitizePhoneNumber(settings?.pairingNumber) ||
-      sanitizePhoneNumber(settings?.ownerNumber) ||
-      "";
-
-    let numero = configuredNumber;
+    let numero = sanitizePhoneNumber(config?.pairingNumber);
 
     if (!numero) {
-      console.log("📲 Bot no vinculado");
+      console.log(`${getBotTag(botState)} Bot no vinculado`);
       numero = sanitizePhoneNumber(
-        await preguntar("Numero con codigo de pais, sin + ni espacios: ")
+        await preguntarSeguro(
+          `Numero del ${config.label} con codigo de pais, sin + ni espacios: `
+        )
       );
     }
 
     if (!numero) {
-      pairingRequested = false;
-      console.log("Numero invalido");
+      botState.pairingRequested = false;
+      console.log(`${getBotTag(botState)} Numero invalido`);
       return;
     }
 
-    console.log("Esperando 5 segundos para pedir el pairing code...");
+    config.pairingNumber = numero;
+
+    console.log(
+      `${getBotTag(botState)} Esperando 5 segundos para pedir el pairing code...`
+    );
     await delay(5000);
 
     const code = await sock.requestPairingCode(numero);
 
-    console.log("\nCODIGO DE VINCULACION:\n");
+    console.log(`\nCODIGO DE VINCULACION ${config.label}:\n`);
     console.log(chalk.greenBright(code));
     console.log(
       chalk.yellow(
@@ -442,22 +777,75 @@ async function requestPairingCodeSafe(sock) {
         "Si WhatsApp lo marca invalido, espera 30-40 minutos y vuelve a intentar solo una vez."
       )
     );
-  } catch (e) {
-    pairingRequested = false;
-    console.error("Error solicitando pairing code:", e);
+  } catch (err) {
+    botState.pairingRequested = false;
+    console.error(`${getBotTag(botState)} Error solicitando pairing code:`, err);
+  }
+}
+
+// ================= MENSAJES =================
+
+async function handleIncomingMessages(botState, sock, messages) {
+  for (const raw of messages || []) {
+    try {
+      if (!raw?.message) continue;
+      if (raw?.key?.fromMe) continue;
+
+      const from = raw?.key?.remoteJid || "";
+      if (shouldIgnoreJid(from)) continue;
+
+      const m = serializeMessage(raw);
+      const texto = String(m?.text || "").trim();
+      if (!texto) continue;
+
+      totalMensajes++;
+
+      const tipo = tipoChat(from);
+      mensajesPorTipo[tipo] = (mensajesPorTipo[tipo] || 0) + 1;
+
+      const executionInfo = await getMessageExecutionInfo(botState, sock, m);
+      const baseContext = createBaseContext(botState, sock, m, executionInfo);
+
+      const blockedByHook = await runMessageHooks(botState, baseContext);
+      if (blockedByHook) continue;
+
+      const commandData = extractCommandData(texto, settings);
+      if (!commandData) continue;
+
+      const cmd = comandos.get(commandData.commandName);
+      if (!cmd) continue;
+
+      const commandContext = {
+        ...baseContext,
+        args: commandData.args,
+        body: commandData.body,
+        usedPrefix: commandData.prefix,
+        commandName: commandData.commandName,
+      };
+
+      const allowed = await canRunCommand(cmd, commandContext);
+      if (!allowed) continue;
+
+      totalComandos++;
+
+      await cmd.run(commandContext);
+    } catch (err) {
+      console.error(`${getBotTag(botState)} Error comando:`, err);
+    }
   }
 }
 
 // ================= BOT =================
 
-async function iniciarBot() {
-  if (conectando) return;
-  conectando = true;
+async function iniciarInstanciaBot(config) {
+  const botState = ensureBotState(config);
+  if (botState.connecting) return;
+  botState.connecting = true;
 
   try {
-    banner();
-
-    const { state, saveCreds } = await useMultiFileAuthState(CARPETA_AUTH);
+    const { state: authState, saveCreds } = await useMultiFileAuthState(
+      config.authFolder
+    );
     const version = await getVersionSafe();
 
     const sock = makeWASocket({
@@ -470,25 +858,26 @@ async function iniciarBot() {
       connectTimeoutMs: 60000,
       keepAliveIntervalMs: 30000,
       auth: {
-        creds: state.creds,
-        keys: makeCacheableSignalKeyStore(state.keys, logger),
+        creds: authState.creds,
+        keys: makeCacheableSignalKeyStore(authState.keys, logger),
       },
       getMessage: async (key) => {
         try {
-          if (!store?.loadMessage) return undefined;
-          const msg = await store.loadMessage(key.remoteJid, key.id);
+          if (!botState.store?.loadMessage) return undefined;
+          const msg = await botState.store.loadMessage(key.remoteJid, key.id);
           return msg?.message || undefined;
         } catch {
           return undefined;
         }
       },
-      cachedGroupMetadata,
+      cachedGroupMetadata: async (jid) => cachedGroupMetadata(botState, jid),
     });
 
-    sockGlobal = sock;
+    botState.sock = sock;
+    botState.authState = authState;
 
-    if (store?.bind) {
-      store.bind(sock.ev);
+    if (botState.store?.bind) {
+      botState.store.bind(sock.ev);
     }
 
     sock.ev.on("creds.update", saveCreds);
@@ -498,32 +887,42 @@ async function iniciarBot() {
         try {
           if (!update?.id) continue;
           const meta = await sock.groupMetadata(update.id);
-          groupCache.set(update.id, meta);
+          botState.groupCache.set(update.id, meta);
         } catch {}
       }
     });
 
     sock.ev.on("group-participants.update", async (update) => {
-      try {
-        if (!update?.id) return;
-        const meta = await sock.groupMetadata(update.id);
-        groupCache.set(update.id, meta);
-      } catch {}
+      if (update?.id) {
+        try {
+          const meta = await sock.groupMetadata(update.id);
+          botState.groupCache.set(update.id, meta);
+        } catch {}
+      }
+
+      await runGroupUpdateHooks(botState, sock, update);
     });
 
     sock.ev.on("connection.update", async ({ connection, lastDisconnect, qr }) => {
       try {
-        if (qr && !sock.authState?.creds?.registered && !pairingRequested) {
-          await requestPairingCodeSafe(sock);
+        if (qr && !isBotRegistered(botState) && !botState.pairingRequested) {
+          await requestPairingCodeSafe(botState);
         }
 
         if (connection === "connecting") {
-          console.log("Conectando...");
+          console.log(`${getBotTag(botState)} Conectando...`);
         }
 
         if (connection === "open") {
-          pairingRequested = false;
-          console.log(chalk.green("✅ DVYER BOT CONECTADO"));
+          if (botState.reconnectTimer) {
+            clearTimeout(botState.reconnectTimer);
+            botState.reconnectTimer = null;
+          }
+
+          botState.pairingRequested = false;
+          console.log(
+            chalk.green(`${getBotTag(botState)} ${config.displayName} conectado`)
+          );
         }
 
         if (connection === "close") {
@@ -532,88 +931,45 @@ async function iniciarBot() {
             lastDisconnect?.error?.data?.statusCode ||
             0;
 
-          console.log("Conexion cerrada:", code);
+          console.log(`${getBotTag(botState)} Conexion cerrada:`, code);
 
           const loggedOut =
             code === 401 || code === DisconnectReason.loggedOut;
 
           if (loggedOut) {
             try {
-              fs.rmSync(CARPETA_AUTH, { recursive: true, force: true });
+              fs.rmSync(config.authFolder, { recursive: true, force: true });
             } catch {}
           }
 
-          pairingRequested = false;
-          scheduleReconnect(loggedOut ? 4000 : 2500);
+          botState.sock = null;
+          botState.pairingRequested = false;
+          scheduleReconnect(botState, loggedOut ? 4000 : 2500);
         }
-      } catch (e) {
-        pairingRequested = false;
-        console.error("Error en connection.update:", e);
+      } catch (err) {
+        botState.pairingRequested = false;
+        console.error(`${getBotTag(botState)} Error en connection.update:`, err);
       }
     });
 
     sock.ev.on("messages.upsert", async ({ messages }) => {
-      for (const raw of messages || []) {
-        try {
-          if (!raw?.message) continue;
-          if (raw?.key?.fromMe) continue;
-
-          const from = raw?.key?.remoteJid || "";
-          if (shouldIgnoreJid(from)) continue;
-
-          const m = serializeMessage(raw);
-          const texto = String(m?.text || "").trim();
-          if (!texto) continue;
-
-          totalMensajes++;
-
-          const tipo = tipoChat(from);
-          mensajesPorTipo[tipo] = (mensajesPorTipo[tipo] || 0) + 1;
-
-          const prefijo = settings.prefix || ".";
-          if (!texto.startsWith(prefijo)) continue;
-
-          const body = texto.slice(prefijo.length).trim();
-          if (!body) continue;
-
-          const args = body.split(/\s+/);
-          const comando = String(args.shift() || "").toLowerCase();
-
-          const cmd = comandos.get(comando);
-          if (!cmd) continue;
-
-          totalComandos++;
-
-          await cmd.run({
-            sock,
-            m,
-            msg: m,
-            from,
-            chat: from,
-            sender: m.sender,
-            isGroup: m.isGroup,
-            text: m.text,
-            body: m.body,
-            quoted: m.quoted,
-            args,
-            settings,
-            comandos,
-          });
-        } catch (e) {
-          console.error("Error comando:", e);
-        }
-      }
+      await handleIncomingMessages(botState, sock, messages);
     });
-  } catch (e) {
-    console.error(e);
+  } catch (err) {
+    console.error(`${getBotTag(config)} Error iniciando bot:`, err);
   } finally {
-    conectando = false;
+    botState.connecting = false;
   }
 }
 
 async function start() {
+  BOT_CONFIGS.forEach((config) => ensureBotState(config));
   await cargarComandos();
-  await iniciarBot();
+  banner();
+
+  for (const config of BOT_CONFIGS) {
+    await iniciarInstanciaBot(config);
+  }
 }
 
 start();
@@ -623,11 +979,25 @@ process.on("SIGINT", () => {
     rl.close();
   } catch {}
 
-  try {
-    if (sockGlobal?.end) {
-      sockGlobal.end(undefined);
-    }
-  } catch {}
+  for (const botState of botStates.values()) {
+    try {
+      if (botState.reconnectTimer) {
+        clearTimeout(botState.reconnectTimer);
+      }
+    } catch {}
+
+    try {
+      if (botState.store?.__writeTimer) {
+        clearInterval(botState.store.__writeTimer);
+      }
+    } catch {}
+
+    try {
+      if (botState.sock?.end) {
+        botState.sock.end(undefined);
+      }
+    } catch {}
+  }
 
   console.log("Bot apagado");
   process.exit(0);

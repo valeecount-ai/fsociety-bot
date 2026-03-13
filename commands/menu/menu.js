@@ -1,7 +1,7 @@
 import fs from "fs";
 import path from "path";
 
-const BOX_INNER_WIDTH = 40;
+const BOX_INNER_WIDTH = 54;
 
 function formatUptime(seconds) {
   const h = Math.floor(seconds / 3600);
@@ -11,6 +11,10 @@ function formatUptime(seconds) {
 
 function repeat(char, count) {
   return char.repeat(Math.max(0, count));
+}
+
+function border(char = "=") {
+  return `+${repeat(char, BOX_INNER_WIDTH + 2)}+`;
 }
 
 function padLine(content = "") {
@@ -25,8 +29,54 @@ function centerLine(content = "") {
   return `|${repeat(" ", left + 1)}${text}${repeat(" ", right + 1)}|`;
 }
 
-function topBorder(char = "=") {
-  return `+${repeat(char, BOX_INNER_WIDTH + 2)}+`;
+function wrapText(text, width = BOX_INNER_WIDTH) {
+  const source = String(text || "").trim();
+  if (!source) return [""];
+
+  const words = source.split(/\s+/);
+  const lines = [];
+  let current = "";
+
+  for (const word of words) {
+    const next = current ? `${current} ${word}` : word;
+    if (next.length <= width) {
+      current = next;
+      continue;
+    }
+
+    if (current) {
+      lines.push(current);
+      current = "";
+    }
+
+    if (word.length <= width) {
+      current = word;
+      continue;
+    }
+
+    let index = 0;
+    while (index < word.length) {
+      lines.push(word.slice(index, index + width));
+      index += width;
+    }
+  }
+
+  if (current) {
+    lines.push(current);
+  }
+
+  return lines.length ? lines : [""];
+}
+
+function buildWrappedLines(text, options = {}) {
+  const width = options.width || BOX_INNER_WIDTH;
+  const prefix = String(options.prefix || "");
+  const continuation = String(options.continuation || repeat(" ", prefix.length));
+  const lines = wrapText(text, Math.max(10, width - prefix.length));
+
+  return lines.map((line, index) =>
+    padLine(`${index === 0 ? prefix : continuation}${line}`)
+  );
 }
 
 function getPrefix(settings) {
@@ -105,27 +155,54 @@ function sortCategories(categories) {
   });
 }
 
+function countCommands(categories) {
+  return Array.from(categories.values()).reduce(
+    (total, items) => total + items.length,
+    0
+  );
+}
+
 function renderStandardCategory(category, items, prefix) {
-  const lines = items.map((item) => padLine(`- \`${prefix}${item.command}\``));
+  const title = `${getCategoryLabel(category)} :: ${items.length} comandos`;
+  const lines = [];
+
+  for (const item of items) {
+    lines.push(...buildWrappedLines(`\`${prefix}${item.command}\``, { prefix: "- " }));
+  }
 
   return [
-    topBorder("-"),
-    centerLine(getCategoryLabel(category)),
-    topBorder("-"),
+    border("-"),
+    centerLine(title),
+    border("-"),
     ...lines,
-    topBorder("-"),
+    border("-"),
   ].join("\n");
 }
 
+function getSubbotStats() {
+  const runtime = global.botRuntime;
+  if (!runtime?.getSubbotRequestState) {
+    return {
+      publicRequests: false,
+      maxSlots: 15,
+      availableSlots: 0,
+      activeSlots: 0,
+      enabledSlots: 0,
+    };
+  }
+
+  return runtime.getSubbotRequestState();
+}
+
 function renderSubbotsCategory(items, prefix) {
+  const stats = getSubbotStats();
   const preferredOrder = ["subbot", "subbots", "subboton", "subbotoff"];
   const labels = {
-    subbot: "Pide codigo para un nuevo subbot",
-    subbots: "Mira slots, tiempos y estados activos",
-    subboton: "Activa el acceso publico a subbots",
-    subbotoff: "Apaga el acceso publico a subbots",
+    subbot: "pide un codigo nuevo para vincular otro bot",
+    subbots: "mira slots, tiempos y subbots activos",
+    subboton: "abre el acceso publico para que todos pidan subbots",
+    subbotoff: "cierra el acceso publico cuando quieras pausar",
   };
-
   const itemMap = new Map(items.map((item) => [item.command, item]));
   const orderedItems = [
     ...preferredOrder
@@ -133,30 +210,79 @@ function renderSubbotsCategory(items, prefix) {
       .map((command) => itemMap.get(command)),
     ...items.filter((item) => !preferredOrder.includes(item.command)),
   ];
+  const modeLabel = stats.publicRequests ? "ENCENDIDO" : "APAGADO";
+  const lines = [
+    padLine(
+      `Slots ${stats.maxSlots} | libres ${stats.availableSlots} | activos ${stats.activeSlots}`
+    ),
+    padLine(`Modo publico ${modeLabel} | reservados ${stats.enabledSlots}`),
+    padLine(""),
+  ];
 
-  const lines = orderedItems.map((item, index) => {
-    const title = labels[item.command] || item.description || "Control de subbots";
-    return padLine(
-      `${String(index + 1).padStart(2, "0")}. \`${prefix}${item.command}\` -> ${title}`
-    );
+  orderedItems.forEach((item, index) => {
+    const title = `${String(index + 1).padStart(2, "0")}. \`${prefix}${item.command}\``;
+    const description = labels[item.command] || item.description || "control de subbots";
+    lines.push(...buildWrappedLines(title, { prefix: "> " }));
+    lines.push(...buildWrappedLines(description, { prefix: "  " }));
   });
 
+  lines.push(padLine(""));
+  lines.push(
+    ...buildWrappedLines(`Rapido: \`${prefix}subbot 519xxxxxxxxx\``, {
+      prefix: "* ",
+    })
+  );
+  lines.push(
+    ...buildWrappedLines(`Fijo: \`${prefix}subbot 3 519xxxxxxxxx\``, {
+      prefix: "* ",
+    })
+  );
+  lines.push(
+    ...buildWrappedLines(`Panel: \`${prefix}subbots\``, {
+      prefix: "* ",
+    })
+  );
+
   return [
-    topBorder("="),
+    border("="),
     centerLine("SUBBOTS CONTROL"),
-    centerLine("Crea, revisa y administra tus slots"),
-    topBorder("="),
+    centerLine("crea, vigila y administra tus slots"),
+    border("="),
     ...lines,
-    padLine(""),
-    padLine(`Tip: \`${prefix}subbot 519xxxxxxxxx\` pide un codigo nuevo`),
-    padLine(`Tip: \`${prefix}subbots\` muestra quien esta conectado`),
-    topBorder("="),
+    border("="),
   ].join("\n");
+}
+
+function buildHeader(settings, categories, prefix) {
+  const totalCommands = countCommands(categories);
+  const totalCategories = categories.size;
+
+  return [
+    border("="),
+    centerLine(String(settings.botName || "BOT")),
+    centerLine("menu principal"),
+    border("="),
+    padLine(`Prefijo   : ${prefix}`),
+    padLine("Estado    : online"),
+    padLine(`Uptime    : ${formatUptime(process.uptime())}`),
+    padLine(`Categorias: ${totalCategories}`),
+    padLine(`Comandos  : ${totalCommands}`),
+    border("="),
+    centerLine("MENU DE COMANDOS"),
+    border("="),
+  ];
+}
+
+function buildFooter() {
+  return [
+    border("="),
+    centerLine("bot premium activo"),
+    border("="),
+  ];
 }
 
 function buildMenuCaption(settings, comandos) {
   const prefix = getPrefix(settings);
-  const uptime = formatUptime(process.uptime());
   const categories = buildCategoryMap(comandos);
   const sections = [];
 
@@ -171,21 +297,9 @@ function buildMenuCaption(settings, comandos) {
     );
   }
 
-  return [
-    topBorder("="),
-    centerLine(String(settings.botName || "BOT")),
-    topBorder("="),
-    padLine(`Prefijo : ${prefix}`),
-    padLine("Estado  : online"),
-    padLine(`Uptime  : ${uptime}`),
-    topBorder("="),
-    centerLine("MENU DE COMANDOS"),
-    topBorder("="),
-    ...sections,
-    topBorder("="),
-    centerLine("bot premium activo"),
-    topBorder("="),
-  ].join("\n");
+  return [...buildHeader(settings, categories, prefix), ...sections, ...buildFooter()].join(
+    "\n"
+  );
 }
 
 export default {

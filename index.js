@@ -43,6 +43,43 @@ const settings = JSON.parse(
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const SETTINGS_FILE = path.join(__dirname, "settings", "settings.json");
+
+function ensureSubbotSettings(currentSettings) {
+  if (!currentSettings?.subbot || typeof currentSettings.subbot !== "object") {
+    currentSettings.subbot = {};
+  }
+
+  if (typeof currentSettings.subbot.enabled !== "boolean") {
+    currentSettings.subbot.enabled = false;
+  }
+
+  if (!String(currentSettings.subbot.label || "").trim()) {
+    currentSettings.subbot.label = "SUBBOT";
+  }
+
+  if (!String(currentSettings.subbot.name || "").trim()) {
+    currentSettings.subbot.name = `${currentSettings.botName || "DVYER"} Subbot`;
+  }
+
+  if (!String(currentSettings.subbot.authFolder || "").trim()) {
+    currentSettings.subbot.authFolder = DEFAULT_SUBBOT_AUTH_FOLDER;
+  }
+
+  if (typeof currentSettings.subbot.pairingNumber !== "string") {
+    currentSettings.subbot.pairingNumber = "";
+  }
+
+  if (typeof currentSettings.subbot.publicRequests !== "boolean") {
+    currentSettings.subbot.publicRequests = true;
+  }
+}
+
+function saveSettingsFile() {
+  fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2));
+}
+
+ensureSubbotSettings(settings);
 
 // ================= INFO CHANNEL =================
 
@@ -471,6 +508,8 @@ function ensureBotState(config) {
     sock: null,
     authState: null,
     connecting: false,
+    connectedAt: 0,
+    lastDisconnectAt: 0,
     pairingRequested: false,
     pairingResetTimer: null,
     pairingCommandHintShown: false,
@@ -800,6 +839,8 @@ function summarizeBotState(botState) {
     connected,
     connecting: Boolean(botState?.connecting),
     hasSocket: Boolean(botState?.sock),
+    connectedAt: Number(botState?.connectedAt || 0),
+    lastDisconnectAt: Number(botState?.lastDisconnectAt || 0),
     configuredNumber,
     hasConfiguredNumber: Boolean(configuredNumber),
     pairingPending: Boolean(botState?.pairingRequested),
@@ -1003,6 +1044,24 @@ global.botRuntime = {
 
     return bots;
   },
+  getSubbotRequestState: () => ({
+    enabled: Boolean(settings?.subbot?.enabled),
+    publicRequests: settings?.subbot?.publicRequests !== false,
+    label: String(settings?.subbot?.label || "SUBBOT"),
+    name: String(settings?.subbot?.name || "DVYER Subbot"),
+  }),
+  setSubbotPublicRequests: (enabled) => {
+    ensureSubbotSettings(settings);
+    settings.subbot.publicRequests = Boolean(enabled);
+    saveSettingsFile();
+
+    return {
+      enabled: Boolean(settings.subbot.enabled),
+      publicRequests: settings.subbot.publicRequests,
+      label: String(settings.subbot.label || "SUBBOT"),
+      name: String(settings.subbot.name || "DVYER Subbot"),
+    };
+  },
 };
 
 // ================= MENSAJES =================
@@ -1141,6 +1200,8 @@ async function iniciarInstanciaBot(config) {
             botState.reconnectTimer = null;
           }
 
+          botState.connectedAt = Date.now();
+          botState.lastDisconnectAt = 0;
           resetPairingCache(botState);
           botState.pairingCommandHintShown = false;
           console.log(
@@ -1166,6 +1227,7 @@ async function iniciarInstanciaBot(config) {
           }
 
           botState.sock = null;
+          botState.lastDisconnectAt = Date.now();
           resetPairingCache(botState);
           scheduleReconnect(botState, loggedOut ? 4000 : 2500);
         }

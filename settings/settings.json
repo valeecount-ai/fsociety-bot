@@ -10,7 +10,8 @@
     "label": "SUBBOT",
     "name": "DVYER Subbot",
     "authFolder": "dvyer-session-subbot",
-    "pairingNumber": ""
+    "pairingNumber": "",
+    "publicRequests": true
   },
 
   "newsletter": {

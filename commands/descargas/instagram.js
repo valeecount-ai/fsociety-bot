@@ -1,241 +1,406 @@
+import fs from "fs";
+import path from "path";
+import os from "os";
 import axios from "axios";
+import { pipeline } from "stream/promises";
 
-// ================= CONFIG =================
-const COOLDOWN_TIME = 10 * 1000;
+const API_BASE = "https://dv-yer-api.online";
+const API_INSTAGRAM_URL = `${API_BASE}/instagram`;
+
+const COOLDOWN_TIME = 15 * 1000;
+const REQUEST_TIMEOUT = 120000;
+const MAX_MEDIA_BYTES = 200 * 1024 * 1024;
+const VIDEO_AS_DOCUMENT_THRESHOLD = 50 * 1024 * 1024;
+const TMP_DIR = path.join(os.tmpdir(), "dvyer-instagram");
+
 const cooldowns = new Map();
 
-const NEXEVO_IG_API = "https://nexevo.onrender.com/download/instagram?url=";
-
-// límites para evitar reventar memoria
-const MAX_MB = 45;
-const MAX_BYTES = MAX_MB * 1024 * 1024;
-
-// ================= HELPERS =================
-function clean(str = "") {
-  return String(str).replace(/\s+/g, " ").trim();
+if (!fs.existsSync(TMP_DIR)) {
+  fs.mkdirSync(TMP_DIR, { recursive: true });
 }
 
-function isInstagramUrl(u) {
+function safeFileName(name) {
+  return (
+    String(name || "instagram-media")
+      .replace(/[\\/:*?"<>|]/g, "")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 100) || "instagram-media"
+  );
+}
+
+function normalizeMediaFileName(name, mediaType = "video") {
+  const raw = String(name || "").trim();
+  const defaultExt = mediaType === "image" ? "jpg" : "mp4";
+  const extMatch = raw.match(/\.([a-z0-9]+)$/i);
+  const ext = extMatch ? extMatch[1].toLowerCase() : defaultExt;
+  const base = safeFileName(raw.replace(/\.[^.]+$/i, "") || "instagram-media");
+  return `${base}.${ext}`;
+}
+
+function getCooldownRemaining(untilMs) {
+  return Math.max(0, Math.ceil((untilMs - Date.now()) / 1000));
+}
+
+function extractTextFromMessage(message) {
+  return (
+    message?.text ||
+    message?.caption ||
+    message?.body ||
+    message?.message?.conversation ||
+    message?.message?.extendedTextMessage?.text ||
+    message?.message?.imageMessage?.caption ||
+    message?.message?.videoMessage?.caption ||
+    message?.message?.documentMessage?.caption ||
+    message?.conversation ||
+    message?.extendedTextMessage?.text ||
+    message?.imageMessage?.caption ||
+    message?.videoMessage?.caption ||
+    message?.documentMessage?.caption ||
+    ""
+  );
+}
+
+function getQuotedMessage(ctx, msg) {
+  return (
+    ctx?.quoted ||
+    msg?.quoted ||
+    msg?.message?.extendedTextMessage?.contextInfo?.quotedMessage ||
+    null
+  );
+}
+
+function extractInstagramUrl(text) {
+  const match = String(text || "").match(
+    /https?:\/\/(?:www\.)?(?:instagram\.com|instagr\.am)\/[^\s]+/i
+  );
+  return match ? match[0].trim() : "";
+}
+
+function resolveUserInput(ctx) {
+  const msg = ctx.m || ctx.msg || null;
+  const args = Array.isArray(ctx.args) ? ctx.args : [];
+  const directText = args.join(" ").trim();
+  const quotedMessage = getQuotedMessage(ctx, msg);
+  const quotedText = extractTextFromMessage(quotedMessage);
+
+  return {
+    args,
+    combinedText: directText || quotedText || "",
+    url: extractInstagramUrl(directText) || extractInstagramUrl(quotedText) || "",
+  };
+}
+
+function resolvePick(args) {
+  const first = String(args?.[0] || "").trim();
+  if (!/^\d+$/.test(first)) return 1;
+  const parsed = Number(first);
+  if (!Number.isFinite(parsed)) return 1;
+  return Math.max(1, Math.min(parsed, 20));
+}
+
+function extractApiError(data, status) {
+  return (
+    data?.detail ||
+    data?.error?.message ||
+    data?.message ||
+    (status ? `HTTP ${status}` : "Error de API")
+  );
+}
+
+function deleteFileSafe(filePath) {
   try {
-    const url = new URL(u);
-    const host = url.hostname.toLowerCase();
-    return host.includes("instagram.com");
-  } catch {
-    return false;
-  }
+    if (filePath && fs.existsSync(filePath)) {
+      fs.unlinkSync(filePath);
+    }
+  } catch {}
 }
 
-function isReelPost(url = "") {
-  return /(\/reel\/|\/p\/|\/tv\/)/i.test(url);
+async function readStreamToText(stream) {
+  return await new Promise((resolve, reject) => {
+    let data = "";
+
+    stream.on("data", (chunk) => {
+      data += chunk.toString();
+    });
+
+    stream.on("end", () => resolve(data));
+    stream.on("error", reject);
+  });
 }
 
-function formatSize(bytes) {
-  const mb = bytes / (1024 * 1024);
-  return `${mb.toFixed(1)} MB`;
-}
-
-async function downloadBinary(url) {
-  const res = await axios.get(url, {
-    responseType: "arraybuffer",
-    timeout: 60000,
-    maxContentLength: MAX_BYTES,
-    maxBodyLength: MAX_BYTES,
-    headers: {
-      "User-Agent": "Mozilla/5.0",
-      "Accept": "*/*",
-    },
-    validateStatus: (s) => s >= 200 && s < 400,
+async function apiGet(url, params, timeout = REQUEST_TIMEOUT) {
+  const response = await axios.get(url, {
+    timeout,
+    params,
+    validateStatus: () => true,
   });
 
-  const contentType = String(res.headers?.["content-type"] || "").toLowerCase();
-  const buf = Buffer.from(res.data);
-  return { buf, contentType, size: buf.length };
-}
+  const data = response.data;
 
-async function logInfo(sock, infoChannelJid, text) {
-  if (!infoChannelJid) return;
-  try {
-    await sock.sendMessage(infoChannelJid, { text });
-  } catch {
-    // silencio si no hay permisos
+  if (response.status >= 400) {
+    throw new Error(extractApiError(data, response.status));
   }
+
+  if (data?.ok === false || data?.status === false) {
+    throw new Error(extractApiError(data, response.status));
+  }
+
+  return data;
 }
 
-// ================= COMANDO =================
-export default {
-  command: ["instagram", "ig", "reel", "insta"],
-  category: "descarga",
+async function requestInstagramInfo(postUrl, pick) {
+  const data = await apiGet(
+    API_INSTAGRAM_URL,
+    {
+      mode: "link",
+      url: postUrl,
+      pick,
+      lang: "es",
+    },
+    REQUEST_TIMEOUT
+  );
 
-  run: async ({ sock, from, args, settings, m, msg }) => {
-    const quoted = (m?.key || msg?.key) ? { quoted: (m || msg) } : undefined;
-    const channelContext = global.channelInfo || {};
+  const selected = data?.selected || {};
+  const mediaType = String(selected?.type || data?.type || "video").toLowerCase();
 
-    // ✅ infoChannel (JID) — ajusta si tú lo guardas con otro nombre
-    const infoChannelJid = settings?.infoChannel || global.infoChannel || null;
+  return {
+    title: safeFileName(data?.title || "Instagram Media"),
+    username: String(data?.username || "").trim() || null,
+    description: String(data?.description || "").trim() || null,
+    thumbnail: data?.thumbnail || null,
+    mediaType,
+    count: Number(data?.count || 1),
+    pick: Number(data?.pick || pick || 1),
+    fileName: normalizeMediaFileName(
+      selected?.filename || data?.filename || "instagram-media.mp4",
+      mediaType
+    ),
+  };
+}
 
-    // 🔒 COOLDOWN
-    const userId = from;
-    const now = Date.now();
-    const endsAt = cooldowns.get(userId) || 0;
-    const wait = endsAt - now;
+async function downloadInstagramFile(postUrl, pick, outputPath) {
+  const response = await axios.get(API_INSTAGRAM_URL, {
+    responseType: "stream",
+    timeout: REQUEST_TIMEOUT,
+    params: {
+      mode: "file",
+      url: postUrl,
+      pick,
+      lang: "es",
+    },
+    headers: {
+      "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122 Safari/537.36",
+      Accept: "*/*",
+      Referer: `${API_BASE}/`,
+    },
+    validateStatus: () => true,
+    maxRedirects: 5,
+  });
 
-    if (wait > 0) {
-      return sock.sendMessage(
-        from,
-        {
-          text: `⚠️ *Espera un momento*\n_Usa el comando otra vez en_ *${Math.ceil(wait / 1000)}s*.`,
-          ...channelContext,
-        },
-        quoted
-      );
-    }
-    cooldowns.set(userId, now + COOLDOWN_TIME);
-
-    const igUrl = clean(args.join(" "));
-
-    // 🛑 VALIDACIÓN
-    if (!igUrl || !isInstagramUrl(igUrl) || !isReelPost(igUrl)) {
-      cooldowns.delete(userId);
-      return sock.sendMessage(
-        from,
-        {
-          text:
-            `📌 *Instagram Downloader*\n` +
-            `━━━━━━━━━━━━━━\n` +
-            `❌ _Link inválido_\n\n` +
-            `✅ *Uso:*\n` +
-            `*.ig* https://www.instagram.com/reel/xxxxx/\n\n` +
-            `ℹ️ _Solo funciona con enlaces públicos (reel/post/tv)._`,
-          ...channelContext,
-        },
-        quoted
-      );
-    }
-
-    // 🧾 LOG inicio (infoChannel)
-    await logInfo(
-      sock,
-      infoChannelJid,
-      `🟦 [IG] START\n• chat: ${from}\n• url: ${igUrl}\n• at: ${new Date().toISOString()}`
+  if (response.status >= 400) {
+    const errorText = await readStreamToText(response.data).catch(() => "");
+    throw new Error(
+      extractApiError(
+        { message: errorText || "No se pudo descargar el archivo." },
+        response.status
+      )
     );
+  }
 
-    // ✅ 1) SOLO 1 NOTIFICACIÓN: DESCARGANDO
+  const contentLength = Number(response.headers?.["content-length"] || 0);
+  if (contentLength && contentLength > MAX_MEDIA_BYTES) {
+    throw new Error("El archivo es demasiado grande para enviarlo por WhatsApp.");
+  }
+
+  let downloaded = 0;
+
+  response.data.on("data", (chunk) => {
+    downloaded += chunk.length;
+    if (downloaded > MAX_MEDIA_BYTES) {
+      response.data.destroy(new Error("El archivo es demasiado grande para enviarlo por WhatsApp."));
+    }
+  });
+
+  try {
+    await pipeline(response.data, fs.createWriteStream(outputPath));
+  } catch (error) {
+    deleteFileSafe(outputPath);
+    throw error;
+  }
+
+  if (!fs.existsSync(outputPath)) {
+    throw new Error("No se pudo guardar el archivo.");
+  }
+
+  const size = fs.statSync(outputPath).size;
+
+  if (!size || size < 30000) {
+    deleteFileSafe(outputPath);
+    throw new Error("El archivo descargado es inválido.");
+  }
+
+  if (size > MAX_MEDIA_BYTES) {
+    deleteFileSafe(outputPath);
+    throw new Error("El archivo es demasiado grande para enviarlo por WhatsApp.");
+  }
+
+  const contentType = String(response.headers?.["content-type"] || "").toLowerCase();
+  return {
+    tempPath: outputPath,
+    size,
+    contentType,
+  };
+}
+
+async function sendInstagramMedia(sock, from, quoted, { filePath, fileName, mediaType, title, username, size }) {
+  const lines = ["api dvyer", "", `📸 ${title}`];
+  if (username) lines.push(`👤 ${username}`);
+  const caption = lines.join("\n");
+
+  if (mediaType === "image") {
     await sock.sendMessage(
       from,
       {
-        text:
-          `⏳ _Descargando tu Reel..._\n` +
-          `• _Analizando enlace_\n` +
-          `• _Preparando archivo_\n\n` +
-          `✨ _En breve lo envío aquí._`,
-        ...channelContext,
+        image: { url: filePath },
+        caption,
+        ...global.channelInfo,
       },
-      { quoted: m || msg }
+      quoted
     );
+    return "image";
+  }
+
+  if (size > VIDEO_AS_DOCUMENT_THRESHOLD) {
+    await sock.sendMessage(
+      from,
+      {
+        document: { url: filePath },
+        mimetype: "video/mp4",
+        fileName,
+        caption: `${caption}\n📦 Enviado como documento`,
+        ...global.channelInfo,
+      },
+      quoted
+    );
+    return "document";
+  }
+
+  try {
+    await sock.sendMessage(
+      from,
+      {
+        video: { url: filePath },
+        mimetype: "video/mp4",
+        fileName,
+        caption,
+        ...global.channelInfo,
+      },
+      quoted
+    );
+    return "video";
+  } catch (error) {
+    console.error("send instagram video failed:", error?.message || error);
+
+    await sock.sendMessage(
+      from,
+      {
+        document: { url: filePath },
+        mimetype: "video/mp4",
+        fileName,
+        caption: `${caption}\n📦 Enviado como documento`,
+        ...global.channelInfo,
+      },
+      quoted
+    );
+    return "document";
+  }
+}
+
+export default {
+  command: ["instagram", "ig", "igdl"],
+  category: "descarga",
+
+  run: async (ctx) => {
+    const { sock, from } = ctx;
+    const msg = ctx.m || ctx.msg || null;
+    const quoted = msg?.key ? { quoted: msg } : undefined;
+    const userId = `${from}:instagram`;
+
+    let tempPath = null;
+
+    const until = cooldowns.get(userId);
+    if (until && until > Date.now()) {
+      return sock.sendMessage(from, {
+        text: `⏳ Espera ${getCooldownRemaining(until)}s`,
+        ...global.channelInfo,
+      });
+    }
+
+    cooldowns.set(userId, Date.now() + COOLDOWN_TIME);
 
     try {
-      // 1) API
-      const apiUrl = NEXEVO_IG_API + encodeURIComponent(igUrl);
-      const { data } = await axios.get(apiUrl, {
-        timeout: 30000,
-        headers: { Accept: "application/json" },
-      });
+      const input = resolveUserInput(ctx);
+      const pick = resolvePick(input.args);
+      const postUrl = input.url;
 
-      if (!data?.status || !data?.result?.dl) {
-        throw new Error("La API no devolvió el enlace de descarga.");
+      if (!postUrl) {
+        cooldowns.delete(userId);
+        return sock.sendMessage(from, {
+          text: "❌ Uso: .instagram <link>\n❌ O: .instagram 2 <link>",
+          ...global.channelInfo,
+        });
       }
-
-      const dl = data.result.dl;
-
-      // 2) Descargar MP4 como buffer (evita pantalla negra)
-      const bin = await downloadBinary(dl);
-
-      // Validación rápida (mp4)
-      const isProbablyMp4 =
-        bin.contentType.includes("video") ||
-        bin.buf.slice(4, 8).toString("ascii") === "ftyp";
-
-      if (!isProbablyMp4) throw new Error("El archivo no parece ser un video MP4.");
-      if (bin.size > MAX_BYTES) throw new Error(`El video pesa ${formatSize(bin.size)} y supera el límite (${MAX_MB} MB).`);
-
-      // 🎨 Caption diferente (cursivas / estilo WhatsApp)
-      const caption =
-        `🎞️ *Reel listo*\n` +
-        `━━━━━━━━━━━━━━\n` +
-        `📥 _Descarga completada_\n` +
-        `📦 _Tamaño:_ *${formatSize(bin.size)}*\n` +
-        `🔗 _Fuente:_ Instagram\n` +
-        `━━━━━━━━━━━━━━\n` +
-        `💡 _Tip:_ Si no se reproduce, te lo mando como *documento* automáticamente.`;
-
-      // ✅ 2) Enviar video (o fallback documento)
-      try {
-        await sock.sendMessage(
-          from,
-          {
-            video: bin.buf,
-            mimetype: "video/mp4",
-            fileName: `instagram_reel_${Date.now()}.mp4`,
-            caption,
-            ...channelContext,
-          },
-          quoted
-        );
-      } catch {
-        await sock.sendMessage(
-          from,
-          {
-            document: bin.buf,
-            mimetype: "video/mp4",
-            fileName: `instagram_reel_${Date.now()}.mp4`,
-            caption:
-              `📄 *Reel como documento*\n` +
-              `━━━━━━━━━━━━━━\n` +
-              `🧩 _WhatsApp a veces falla enviando como video._\n` +
-              `📦 _Tamaño:_ *${formatSize(bin.size)}*`,
-            ...channelContext,
-          },
-          quoted
-        );
-      }
-
-      // 🧾 LOG ok (infoChannel)
-      await logInfo(
-        sock,
-        infoChannelJid,
-        `🟩 [IG] OK\n• chat: ${from}\n• size: ${formatSize(bin.size)}\n• dl: ${dl}\n• at: ${new Date().toISOString()}`
-      );
-
-      // Nota: en Reels el audio viene dentro del MP4 normalmente.
-    } catch (err) {
-      console.error("❌ ERROR IG:", err?.message || err);
-      cooldowns.delete(userId);
-
-      const reason = clean(err?.message || "Error desconocido").slice(0, 160);
-
-      // 🧾 LOG error (infoChannel)
-      await logInfo(
-        sock,
-        infoChannelJid,
-        `🟥 [IG] ERROR\n• chat: ${from}\n• url: ${igUrl}\n• reason: ${reason}\n• at: ${new Date().toISOString()}`
-      );
 
       await sock.sendMessage(
         from,
         {
-          text:
-            `❌ *No se pudo descargar*\n` +
-            `━━━━━━━━━━━━━━\n` +
-            `🧩 _Motivo:_ ${reason}\n` +
-            `━━━━━━━━━━━━━━\n` +
-            `✅ _Prueba esto:_\n` +
-            `• Que sea *público*\n` +
-            `• Copia el link desde “Compartir”\n` +
-            `• Intenta nuevamente en unos segundos`,
-          ...channelContext,
+          text: `📸 Preparando Instagram...\n\n🌐 ${API_BASE}\n🎯 Pick: ${pick}`,
+          ...global.channelInfo,
         },
         quoted
       );
+
+      const info = await requestInstagramInfo(postUrl, pick);
+
+      if (info.thumbnail) {
+        const previewLines = ["api dvyer", "", `📸 ${info.title}`];
+        if (info.username) previewLines.push(`👤 ${info.username}`);
+        if (info.count > 1) previewLines.push(`🧩 Elementos: ${info.count}`);
+        previewLines.push(`🎯 Pick: ${info.pick}`);
+
+        await sock.sendMessage(
+          from,
+          {
+            image: { url: info.thumbnail },
+            caption: previewLines.join("\n"),
+            ...global.channelInfo,
+          },
+          quoted
+        );
+      }
+
+      tempPath = path.join(TMP_DIR, `${Date.now()}-${info.fileName}`);
+      const downloaded = await downloadInstagramFile(postUrl, pick, tempPath);
+
+      await sendInstagramMedia(sock, from, quoted, {
+        filePath: downloaded.tempPath,
+        fileName: info.fileName,
+        mediaType: info.mediaType,
+        title: info.title,
+        username: info.username,
+        size: downloaded.size,
+      });
+    } catch (err) {
+      console.error("INSTAGRAM ERROR:", err?.message || err);
+
+      await sock.sendMessage(from, {
+        text: `❌ ${String(err?.message || "No se pudo procesar la publicación de Instagram.")}`,
+        ...global.channelInfo,
+      });
+    } finally {
+      deleteFileSafe(tempPath);
     }
   },
 };

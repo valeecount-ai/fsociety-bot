@@ -33,6 +33,7 @@ const {
 
 const DEFAULT_AUTH_FOLDER = "dvyer-session";
 const DEFAULT_SUBBOT_AUTH_FOLDER = "dvyer-session-subbot";
+const PAIRING_CODE_CACHE_MS = 60_000;
 const logger = pino({ level: "silent" });
 const FIXED_BROWSER = ["Windows", "Chrome", "114.0.5735.198"];
 
@@ -471,6 +472,11 @@ function ensureBotState(config) {
     authState: null,
     connecting: false,
     pairingRequested: false,
+    pairingResetTimer: null,
+    pairingCommandHintShown: false,
+    lastPairingCode: "",
+    lastPairingNumber: "",
+    lastPairingAt: 0,
     reconnectTimer: null,
     groupCache: new Map(),
     store: createStoreForBot(config.id),
@@ -731,42 +737,212 @@ async function cargarComandos() {
 
 // ================= PAIRING =================
 
-async function requestPairingCodeSafe(botState) {
-  const { sock, config } = botState;
-  if (!sock) return;
-  if (botState.pairingRequested || isBotRegistered(botState)) return;
+function clearPairingResetTimer(botState) {
+  if (!botState?.pairingResetTimer) return;
+  clearTimeout(botState.pairingResetTimer);
+  botState.pairingResetTimer = null;
+}
 
+function resetPairingCache(botState) {
+  clearPairingResetTimer(botState);
+  botState.pairingRequested = false;
+  botState.lastPairingCode = "";
+  botState.lastPairingNumber = "";
+  botState.lastPairingAt = 0;
+}
+
+function cachePairingCode(botState, code, number) {
+  clearPairingResetTimer(botState);
   botState.pairingRequested = true;
+  botState.lastPairingCode = String(code || "");
+  botState.lastPairingNumber = String(number || "");
+  botState.lastPairingAt = Date.now();
+
+  botState.pairingResetTimer = setTimeout(() => {
+    resetPairingCache(botState);
+  }, PAIRING_CODE_CACHE_MS);
+
+  botState.pairingResetTimer.unref?.();
+}
+
+function getCachedPairingCode(botState) {
+  if (!botState?.lastPairingCode || !botState?.lastPairingAt) {
+    return null;
+  }
+
+  const age = Date.now() - botState.lastPairingAt;
+  if (age >= PAIRING_CODE_CACHE_MS) {
+    resetPairingCache(botState);
+    return null;
+  }
+
+  return {
+    code: botState.lastPairingCode,
+    number: botState.lastPairingNumber,
+    expiresInMs: PAIRING_CODE_CACHE_MS - age,
+  };
+}
+
+function summarizeBotState(botState) {
+  const config = botState?.config || {};
+  const cachedPairing = getCachedPairingCode(botState);
+  const registered = isBotRegistered(botState);
+  const connected = Boolean(botState?.sock?.user?.id);
+  const configuredNumber = sanitizePhoneNumber(config?.pairingNumber);
+
+  return {
+    id: String(config.id || ""),
+    label: String(config.label || "BOT"),
+    displayName: String(config.displayName || "Bot"),
+    authFolder: String(config.authFolder || ""),
+    enabled: true,
+    registered,
+    connected,
+    connecting: Boolean(botState?.connecting),
+    hasSocket: Boolean(botState?.sock),
+    configuredNumber,
+    hasConfiguredNumber: Boolean(configuredNumber),
+    pairingPending: Boolean(botState?.pairingRequested),
+    cachedPairingCode: cachedPairing?.code || "",
+    cachedPairingNumber: cachedPairing?.number || "",
+    cachedPairingExpiresInMs: cachedPairing?.expiresInMs || 0,
+  };
+}
+
+function shouldPromptInConsole(botState) {
+  return botState?.config?.id === "main";
+}
+
+async function ensureBotSocket(botState) {
+  if (botState?.sock) return botState.sock;
+
+  if (!botState.connecting) {
+    await iniciarInstanciaBot(botState.config);
+  }
+
+  const timeoutAt = Date.now() + 8000;
+
+  while (!botState.sock && botState.connecting && Date.now() < timeoutAt) {
+    await delay(250);
+  }
+
+  return botState.sock;
+}
+
+async function requestPairingCode(botState, options = {}) {
+  const { number, allowPrompt = false, useCache = true } = options;
+
+  if (!botState) {
+    return {
+      ok: false,
+      status: "missing_bot",
+      message: "No encontre la instancia del bot solicitado.",
+    };
+  }
+
+  if (isBotRegistered(botState)) {
+    return {
+      ok: false,
+      status: "already_linked",
+      message: `${botState.config.displayName} ya esta vinculado.`,
+    };
+  }
+
+  const cached = useCache ? getCachedPairingCode(botState) : null;
+  if (cached) {
+    return {
+      ok: true,
+      status: "cached",
+      cached: true,
+      label: botState.config.label,
+      displayName: botState.config.displayName,
+      code: cached.code,
+      number: cached.number,
+      expiresInMs: cached.expiresInMs,
+    };
+  }
+
+  let resolvedNumber =
+    sanitizePhoneNumber(number) || sanitizePhoneNumber(botState.config?.pairingNumber);
+
+  if (!resolvedNumber && allowPrompt) {
+    console.log(`${getBotTag(botState)} Bot no vinculado`);
+    resolvedNumber = sanitizePhoneNumber(
+      await preguntarSeguro(
+        `Numero del ${botState.config.label} con codigo de pais, sin + ni espacios: `
+      )
+    );
+  }
+
+  if (!resolvedNumber) {
+    return {
+      ok: false,
+      status: "missing_number",
+      message: `Usa ${
+        Array.isArray(settings.prefix) ? settings.prefix[0] || "." : settings.prefix || "."
+      }subbot 519xxxxxxxxx para pedir el codigo.`,
+    };
+  }
+
+  if (botState.pairingRequested) {
+    return {
+      ok: false,
+      status: "pending",
+      message: `Ya hay una solicitud de codigo en proceso para ${botState.config.displayName}.`,
+    };
+  }
+
+  const sock = await ensureBotSocket(botState);
+  if (!sock) {
+    return {
+      ok: false,
+      status: "unavailable",
+      message: `${botState.config.displayName} aun se esta iniciando. Intenta de nuevo en unos segundos.`,
+    };
+  }
+
+  botState.config.pairingNumber = resolvedNumber;
+  botState.pairingRequested = true;
+  botState.pairingCommandHintShown = false;
 
   try {
-    let numero = sanitizePhoneNumber(config?.pairingNumber);
-
-    if (!numero) {
-      console.log(`${getBotTag(botState)} Bot no vinculado`);
-      numero = sanitizePhoneNumber(
-        await preguntarSeguro(
-          `Numero del ${config.label} con codigo de pais, sin + ni espacios: `
-        )
-      );
-    }
-
-    if (!numero) {
-      botState.pairingRequested = false;
-      console.log(`${getBotTag(botState)} Numero invalido`);
-      return;
-    }
-
-    config.pairingNumber = numero;
-
     console.log(
       `${getBotTag(botState)} Esperando 5 segundos para pedir el pairing code...`
     );
     await delay(5000);
 
-    const code = await sock.requestPairingCode(numero);
+    const code = await sock.requestPairingCode(resolvedNumber);
+    cachePairingCode(botState, code, resolvedNumber);
 
-    console.log(`\nCODIGO DE VINCULACION ${config.label}:\n`);
-    console.log(chalk.greenBright(code));
+    return {
+      ok: true,
+      status: "created",
+      cached: false,
+      label: botState.config.label,
+      displayName: botState.config.displayName,
+      code,
+      number: resolvedNumber,
+      expiresInMs: PAIRING_CODE_CACHE_MS,
+    };
+  } catch (err) {
+    resetPairingCache(botState);
+    return {
+      ok: false,
+      status: "error",
+      message: err?.message || "No pude obtener el codigo de vinculacion.",
+      error: err,
+    };
+  }
+}
+
+async function requestPairingCodeSafe(botState) {
+  const result = await requestPairingCode(botState, {
+    allowPrompt: shouldPromptInConsole(botState),
+  });
+
+  if (result.ok) {
+    console.log(`\nCODIGO DE VINCULACION ${result.label}:\n`);
+    console.log(chalk.greenBright(result.code));
     console.log(
       chalk.yellow(
         "WhatsApp > Dispositivos vinculados > Vincular con numero de telefono"
@@ -777,11 +953,57 @@ async function requestPairingCodeSafe(botState) {
         "Si WhatsApp lo marca invalido, espera 30-40 minutos y vuelve a intentar solo una vez."
       )
     );
-  } catch (err) {
-    botState.pairingRequested = false;
-    console.error(`${getBotTag(botState)} Error solicitando pairing code:`, err);
+    return;
   }
+
+  if (result.status === "missing_number") {
+    if (!botState.pairingCommandHintShown) {
+      botState.pairingCommandHintShown = true;
+      console.log(`${getBotTag(botState)} ${result.message}`);
+    }
+    return;
+  }
+
+  if (result.status === "pending" || result.status === "already_linked") {
+    return;
+  }
+
+  console.error(
+    `${getBotTag(botState)} Error solicitando pairing code:`,
+    result.error || result.message
+  );
 }
+
+global.botRuntime = {
+  requestBotPairingCode: async (botId, options = {}) => {
+    const targetState = botStates.get(String(botId || "").toLowerCase());
+
+    if (!targetState) {
+      return {
+        ok: false,
+        status: "missing_bot",
+        message: "No encontre ese bot para vincular.",
+      };
+    }
+
+    return requestPairingCode(targetState, {
+      number: options?.number,
+      allowPrompt: false,
+      useCache: options?.useCache !== false,
+    });
+  },
+  listBots: (options = {}) => {
+    const includeMain = options?.includeMain === true;
+    const onlyConnected = options?.onlyConnected === true;
+
+    const bots = Array.from(botStates.values())
+      .filter((botState) => includeMain || botState?.config?.id !== "main")
+      .map((botState) => summarizeBotState(botState))
+      .filter((bot) => !onlyConnected || bot.connected);
+
+    return bots;
+  },
+};
 
 // ================= MENSAJES =================
 
@@ -919,7 +1141,8 @@ async function iniciarInstanciaBot(config) {
             botState.reconnectTimer = null;
           }
 
-          botState.pairingRequested = false;
+          resetPairingCache(botState);
+          botState.pairingCommandHintShown = false;
           console.log(
             chalk.green(`${getBotTag(botState)} ${config.displayName} conectado`)
           );
@@ -943,11 +1166,11 @@ async function iniciarInstanciaBot(config) {
           }
 
           botState.sock = null;
-          botState.pairingRequested = false;
+          resetPairingCache(botState);
           scheduleReconnect(botState, loggedOut ? 4000 : 2500);
         }
       } catch (err) {
-        botState.pairingRequested = false;
+        resetPairingCache(botState);
         console.error(`${getBotTag(botState)} Error en connection.update:`, err);
       }
     });
@@ -990,6 +1213,10 @@ process.on("SIGINT", () => {
       if (botState.store?.__writeTimer) {
         clearInterval(botState.store.__writeTimer);
       }
+    } catch {}
+
+    try {
+      clearPairingResetTimer(botState);
     } catch {}
 
     try {

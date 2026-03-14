@@ -1,9 +1,11 @@
 import {
+  buildSubbotCard,
   formatDuration,
   getCurrentChatStatus,
   getPrefix,
   getSubbotQuoted,
   hasSubbotRuntime,
+  parseSlotToken,
   parseSubbotRequestArgs,
 } from "./_shared.js";
 
@@ -29,6 +31,7 @@ export default {
     const prefix = getPrefix(settings);
     const runtime = global.botRuntime;
     const chatStatus = getCurrentChatStatus({ isGroup, botId, botLabel });
+    const action = String(args[0] || "").trim().toLowerCase();
 
     if (!hasSubbotRuntime(runtime)) {
       return sock.sendMessage(
@@ -42,6 +45,167 @@ export default {
     }
 
     const subbotAccess = runtime.getSubbotRequestState();
+
+    if (["info", "estado"].includes(action)) {
+      if (!esOwner) {
+        return sock.sendMessage(
+          from,
+          {
+            text: "Solo el owner puede ver el detalle de un slot de subbot.",
+            ...global.channelInfo,
+          },
+          quoted
+        );
+      }
+
+      const slot = parseSlotToken(args[1], Number(subbotAccess?.maxSlots || 15));
+      if (!slot || !runtime?.getBotSummary) {
+        return sock.sendMessage(
+          from,
+          {
+            text: `Usa: *${prefix}subbot info 3*`,
+            ...global.channelInfo,
+          },
+          quoted
+        );
+      }
+
+      const bot = runtime.getBotSummary(`subbot${slot}`);
+      if (!bot) {
+        return sock.sendMessage(
+          from,
+          {
+            text: `No encontre el slot ${slot}.`,
+            ...global.channelInfo,
+          },
+          quoted
+        );
+      }
+
+      return sock.sendMessage(
+        from,
+        {
+          text:
+            `*INFO SUBBOT ${slot}*\n\n` +
+            `${buildSubbotCard(bot)}\n\n` +
+            `En este chat: ${chatStatus}`,
+          ...global.channelInfo,
+        },
+        quoted
+      );
+    }
+
+    if (["liberar", "release", "free"].includes(action)) {
+      if (!esOwner) {
+        return sock.sendMessage(
+          from,
+          {
+            text: "Solo el owner puede liberar slots de subbot.",
+            ...global.channelInfo,
+          },
+          quoted
+        );
+      }
+
+      const slot = parseSlotToken(args[1], Number(subbotAccess?.maxSlots || 15));
+      if (!slot || !runtime?.releaseSubbot) {
+        return sock.sendMessage(
+          from,
+          {
+            text: `Usa: *${prefix}subbot liberar 3*`,
+            ...global.channelInfo,
+          },
+          quoted
+        );
+      }
+
+      const result = runtime.releaseSubbot(`subbot${slot}`);
+      return sock.sendMessage(
+        from,
+        {
+          text: result?.ok
+            ? `Slot ${slot} liberado correctamente.`
+            : result?.message || "No pude liberar ese slot.",
+          ...global.channelInfo,
+        },
+        quoted
+      );
+    }
+
+    if (["reset", "reiniciar"].includes(action)) {
+      if (!esOwner) {
+        return sock.sendMessage(
+          from,
+          {
+            text: "Solo el owner puede resetear subbots.",
+            ...global.channelInfo,
+          },
+          quoted
+        );
+      }
+
+      const slot = parseSlotToken(args[1], Number(subbotAccess?.maxSlots || 15));
+      if (!slot || !runtime?.resetSubbot) {
+        return sock.sendMessage(
+          from,
+          {
+            text: `Usa: *${prefix}subbot reset 3*`,
+            ...global.channelInfo,
+          },
+          quoted
+        );
+      }
+
+      const result = runtime.resetSubbot(`subbot${slot}`);
+      return sock.sendMessage(
+        from,
+        {
+          text: result?.ok
+            ? `Slot ${slot} reseteado correctamente.`
+            : result?.message || "No pude resetear ese slot.",
+          ...global.channelInfo,
+        },
+        quoted
+      );
+    }
+
+    if (["slots", "espacios", "capacidad"].includes(action)) {
+      if (!esOwner) {
+        return sock.sendMessage(
+          from,
+          {
+            text: "Solo el owner puede cambiar la capacidad de subbots.",
+            ...global.channelInfo,
+          },
+          quoted
+        );
+      }
+
+      const nextSlots = Number.parseInt(String(args[1] || ""), 10);
+      if (!Number.isFinite(nextSlots) || !runtime?.setSubbotMaxSlots) {
+        return sock.sendMessage(
+          from,
+          {
+            text: `Usa: *${prefix}subbot slots 20*`,
+            ...global.channelInfo,
+          },
+          quoted
+        );
+      }
+
+      const result = runtime.setSubbotMaxSlots(nextSlots);
+      return sock.sendMessage(
+        from,
+        {
+          text: result?.ok
+            ? `Capacidad actualizada a *${result.state.maxSlots}* slots.`
+            : result?.message || "No pude actualizar la capacidad de subbots.",
+          ...global.channelInfo,
+        },
+        quoted
+      );
+    }
+
     const parsed = parseSubbotRequestArgs(
       args,
       Number(subbotAccess?.maxSlots || 15)
@@ -56,7 +220,11 @@ export default {
             `*${prefix}subbot*\n` +
             `*${prefix}subbot 3*\n` +
             `*${prefix}subbot 519xxxxxxxxx*\n` +
-            `*${prefix}subbot 3 519xxxxxxxxx*`,
+            `*${prefix}subbot 3 519xxxxxxxxx*\n` +
+            `*${prefix}subbot info 3*\n` +
+            `*${prefix}subbot liberar 3*\n` +
+            `*${prefix}subbot reset 3*\n` +
+            `*${prefix}subbot slots 20*`,
           ...global.channelInfo,
         },
         quoted

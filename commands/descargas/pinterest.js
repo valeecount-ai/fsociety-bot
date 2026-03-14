@@ -1,12 +1,8 @@
-import axios from "axios";
+import { searchPinterestImages } from "./_searchFallbacks.js";
 
-// ================= CONFIG =================
 const COOLDOWN_TIME = 8 * 1000;
 const cooldowns = new Map();
 
-const PIN_API = "https://nexevo.onrender.com/search/pinterest?q=";
-
-// ================= HELPERS =================
 function clean(str = "") {
   return String(str).replace(/\s+/g, " ").trim();
 }
@@ -20,176 +16,93 @@ function pickRandom(arr = []) {
   return arr[Math.floor(Math.random() * arr.length)];
 }
 
-async function logInfo(sock, infoChannelJid, text) {
-  if (!infoChannelJid) return;
-  try {
-    await sock.sendMessage(infoChannelJid, { text });
-  } catch {
-    // no romper si no hay permisos
-  }
-}
-
-// ================= COMANDO =================
 export default {
+  name: "pinterest",
   command: ["pinterest", "pin", "pint", "psearch"],
   category: "busqueda",
+  description: "Busca imagenes estilo Pinterest",
 
-  run: async ({ sock, from, args, settings, m, msg }) => {
-    const quoted = (m?.key || msg?.key) ? { quoted: (m || msg) } : undefined;
-    const channelContext = global.channelInfo || {};
-
-    // ✅ infoChannel (JID) — ajusta si lo guardas con otro nombre
-    const infoChannelJid = settings?.infoChannel || global.infoChannel || null;
-
-    // 🔒 COOLDOWN
+  run: async ({ sock, from, args, msg }) => {
+    const quoted = msg?.key ? { quoted: msg } : undefined;
     const userId = from;
     const now = Date.now();
-    const endsAt = cooldowns.get(userId) || 0;
-    const wait = endsAt - now;
+    const wait = (cooldowns.get(userId) || 0) - now;
 
     if (wait > 0) {
       return sock.sendMessage(
         from,
         {
-          text: `🕒 _Espera_ *${Math.ceil(wait / 1000)}s* _para volver a buscar._`,
-          ...channelContext,
+          text: `Espera ${Math.ceil(wait / 1000)}s para volver a buscar.`,
+          ...global.channelInfo,
         },
         quoted
       );
     }
-    cooldowns.set(userId, now + COOLDOWN_TIME);
 
-    // 🔎 Query
     const query = clean(args.join(" "));
     if (!query) {
-      cooldowns.delete(userId);
       return sock.sendMessage(
         from,
         {
-          text:
-            `🔎 *Pinterest Search*\n` +
-            `━━━━━━━━━━━━━━\n` +
-            `❗ _Escribe qué quieres buscar._\n\n` +
-            `✅ *Ejemplo:*\n` +
-            `*.pin goku*\n` +
-            `*.pinterest wallpaper anime*\n` +
-            `━━━━━━━━━━━━━━`,
-          ...channelContext,
+          text: "Uso:\n.pin goku\n.pinterest wallpaper anime",
+          ...global.channelInfo,
         },
         quoted
       );
     }
 
-    // 🧾 LOG inicio
-    await logInfo(
-      sock,
-      infoChannelJid,
-      `🟦 [PIN] START\n• chat: ${from}\n• q: ${query}\n• at: ${new Date().toISOString()}`
-    );
+    cooldowns.set(userId, now + COOLDOWN_TIME);
 
-    // ✅ 1) Notificación única (sin spam)
     await sock.sendMessage(
       from,
       {
-        text:
-          `🧷 _Buscando en Pinterest..._\n` +
-          `• _Consulta:_ *${clip(query, 40)}*\n` +
-          `• _Cargando resultados..._`,
-        ...channelContext,
+        text: `Buscando imagenes para *${clip(query, 40)}*...`,
+        ...global.channelInfo,
       },
-      { quoted: m || msg }
+      quoted
     );
 
     try {
-      // 1) API
-      const apiUrl = PIN_API + encodeURIComponent(query);
-      const { data } = await axios.get(apiUrl, {
-        timeout: 30000,
-        headers: { Accept: "application/json" },
-      });
+      const results = await searchPinterestImages(query, 8);
 
-      if (!data?.status || !Array.isArray(data?.result)) {
-        throw new Error("Respuesta inválida de la API.");
-      }
-
-      if (!data.result.length) {
+      if (!results.length) {
         cooldowns.delete(userId);
-        await logInfo(
-          sock,
-          infoChannelJid,
-          `🟨 [PIN] EMPTY\n• chat: ${from}\n• q: ${query}\n• at: ${new Date().toISOString()}`
-        );
         return sock.sendMessage(
           from,
           {
-            text:
-              `😿 _No encontré resultados._\n` +
-              `━━━━━━━━━━━━━━\n` +
-              `🔎 _Prueba con otra palabra:_ *${clip(query, 40)}*`,
-            ...channelContext,
+            text: "No encontre imagenes para esa busqueda.",
+            ...global.channelInfo,
           },
           quoted
         );
       }
 
-      // 2) Elegir 1 resultado (random para que sea más divertido)
-      const item = pickRandom(data.result);
-
-      const title = clean(item?.titulo || "Sin título");
-      const img =
-        item?.image_large_url ||
-        item?.image_medium_url ||
-        item?.image_small_url;
-
-      if (!img) throw new Error("No encontré imagen válida en el resultado.");
-
-      // 3) Enviar imagen + caption (2do mensaje total)
-      const caption =
-        `🧷 *Pinterest Result*\n` +
-        `━━━━━━━━━━━━━━\n` +
-        `✨ _Búsqueda:_ *${clip(query, 40)}*\n` +
-        `🖼️ _Título:_ *${clip(title, 70)}*\n` +
-        `━━━━━━━━━━━━━━\n` +
-        `💡 _Tip:_ escribe *.pin ${clip(query, 20)}* para otra imagen.`;
+      const item = pickRandom(results);
+      const imageUrl =
+        item.image_large_url || item.image_medium_url || item.image_small_url;
 
       await sock.sendMessage(
         from,
         {
-          image: { url: img },
-          caption,
-          ...channelContext,
+          image: { url: imageUrl },
+          caption:
+            `*Pinterest Result*\n` +
+            `Busqueda: *${clip(query, 40)}*\n` +
+            `Titulo: *${clip(item.title || query, 70)}*\n` +
+            `Fuente: ${item.source || "pinterest"}`,
+          ...global.channelInfo,
         },
         quoted
       );
-
-      // 🧾 LOG ok
-      await logInfo(
-        sock,
-        infoChannelJid,
-        `🟩 [PIN] OK\n• chat: ${from}\n• q: ${query}\n• title: ${clip(title, 80)}\n• img: ${img}\n• at: ${new Date().toISOString()}`
-      );
-    } catch (err) {
-      console.error("❌ ERROR PIN:", err?.message || err);
+    } catch (error) {
+      console.error("ERROR PIN:", error?.message || error);
       cooldowns.delete(userId);
-
-      const reason = clean(err?.message || "Error desconocido").slice(0, 160);
-
-      await logInfo(
-        sock,
-        infoChannelJid,
-        `🟥 [PIN] ERROR\n• chat: ${from}\n• q: ${query}\n• reason: ${reason}\n• at: ${new Date().toISOString()}`
-      );
 
       await sock.sendMessage(
         from,
         {
-          text:
-            `❌ *No pude buscar imágenes*\n` +
-            `━━━━━━━━━━━━━━\n` +
-            `🧩 _Motivo:_ ${reason}\n` +
-            `━━━━━━━━━━━━━━\n` +
-            `✅ _Intenta otra palabra o repite en unos segundos._`,
-          ...channelContext,
+          text: `No pude buscar imagenes: ${clean(error?.message || "error desconocido")}`,
+          ...global.channelInfo,
         },
         quoted
       );

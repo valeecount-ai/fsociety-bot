@@ -1,65 +1,64 @@
-import axios from "axios";
+import { searchTikTokVideos } from "./_searchFallbacks.js";
 
 export default {
   name: "ttsearch",
   command: ["ttksearch", "tts", "tiktoksearch"],
   category: "descarga",
-  desc: "Busca videos de TikTok y envía 2 resultados",
+  description: "Busca videos de TikTok y envia 2 resultados",
 
   run: async ({ sock, msg, from, args, settings }) => {
-
     const q = args.join(" ").trim();
 
     if (!q) {
       return sock.sendMessage(
         from,
-        { text: `❌ Uso:\n${settings.prefix}ttksearch <texto>\nEj: ${settings.prefix}ttsearch edit goku`, ...global.channelInfo },
+        {
+          text: `Uso:\n${settings.prefix}ttksearch <texto>\nEj: ${settings.prefix}ttsearch edit goku`,
+          ...global.channelInfo,
+        },
         { quoted: msg }
       );
     }
 
     try {
+      const results = await searchTikTokVideos(q, 2);
 
-      const api = `https://nexevo.onrender.com/search/tiktok?q=${encodeURIComponent(q)}`;
-
-      const { data } = await axios.get(api);
-
-      if (!data?.status || !data?.result?.length) {
+      if (!results.length) {
         return sock.sendMessage(
           from,
-          { text: "❌ No encontré resultados.", ...global.channelInfo },
-          { quoted: msg }
-        );
-      }
-
-      const results = data.result.slice(0, 2); // solo 2 videos
-
-      for (const v of results) {
-
-        const title = v.title || "Video TikTok";
-        const author = v?.author?.unique_id || "usuario";
-
-        await sock.sendMessage(
-          from,
           {
-            video: { url: v.play },
-            caption: `🎬 *${title}*\n👤 @${author}`,
-            ...global.channelInfo
+            text: "No encontre resultados de TikTok.",
+            ...global.channelInfo,
           },
           { quoted: msg }
         );
-
       }
 
-    } catch (e) {
-
-      console.error("Error ejecutando ttsearch:", e);
+      for (const item of results) {
+        await sock.sendMessage(
+          from,
+          {
+            video: { url: item.play },
+            caption:
+              `*${item.title || "Video TikTok"}*\n` +
+              `@${item.author || "usuario"}\n` +
+              `Fuente: ${item.source || "tiktok"}`,
+            ...global.channelInfo,
+          },
+          { quoted: msg }
+        );
+      }
+    } catch (error) {
+      console.error("Error ejecutando ttsearch:", error?.message || error);
 
       await sock.sendMessage(
         from,
-        { text: "❌ Error obteniendo videos de TikTok.", ...global.channelInfo },
+        {
+          text: "Error obteniendo videos de TikTok.",
+          ...global.channelInfo,
+        },
         { quoted: msg }
       );
     }
-  }
+  },
 };

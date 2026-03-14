@@ -8,6 +8,7 @@ import chalk from "chalk";
 import readline from "readline";
 import fs from "fs";
 import path from "path";
+import { spawn } from "child_process";
 import { fileURLToPath, pathToFileURL } from "url";
 
 const makeWASocket =
@@ -33,8 +34,10 @@ const {
 
 const DEFAULT_AUTH_FOLDER = "dvyer-session";
 const DEFAULT_SUBBOT_AUTH_FOLDER = "dvyer-session-subbot";
-const MAX_SUBBOT_SLOTS = 15;
+const DEFAULT_SUBBOT_SLOTS = 15;
+const MAX_SUBBOT_SLOTS = 50;
 const PAIRING_CODE_CACHE_MS = 60_000;
+const PROCESS_RESTART_DELAY_MS = 3000;
 const logger = pino({ level: "silent" });
 const FIXED_BROWSER = ["Windows", "Chrome", "114.0.5735.198"];
 
@@ -45,6 +48,40 @@ const settings = JSON.parse(
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const SETTINGS_FILE = path.join(__dirname, "settings", "settings.json");
+const DATABASE_DIR = path.join(process.cwd(), "database");
+const USAGE_STATS_FILE = path.join(DATABASE_DIR, "usage-stats.json");
+
+function clampSubbotSlots(value) {
+  const parsed = Number(value || 0);
+
+  if (!Number.isFinite(parsed)) {
+    return DEFAULT_SUBBOT_SLOTS;
+  }
+
+  return Math.max(1, Math.min(MAX_SUBBOT_SLOTS, Math.floor(parsed)));
+}
+
+function getConfiguredSubbotSlotsCount(currentSettings) {
+  return clampSubbotSlots(currentSettings?.subbot?.maxSlots || DEFAULT_SUBBOT_SLOTS);
+}
+
+function normalizeMaintenanceMode(value) {
+  const normalized = String(value || "off").trim().toLowerCase();
+
+  if (normalized === "on" || normalized === "owner" || normalized === "owner_only") {
+    return "owner_only";
+  }
+
+  if (
+    normalized === "downloads" ||
+    normalized === "downloads_off" ||
+    normalized === "descargas"
+  ) {
+    return "downloads_off";
+  }
+
+  return "off";
+}
 
 function isPlainObject(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -167,8 +204,9 @@ function buildSubbotSlotConfigs(currentSettings) {
   const rawSlots = Array.isArray(currentSettings?.subbots)
     ? currentSettings.subbots
     : [];
+  const slotCount = getConfiguredSubbotSlotsCount(currentSettings);
 
-  return Array.from({ length: MAX_SUBBOT_SLOTS }, (_, index) =>
+  return Array.from({ length: slotCount }, (_, index) =>
     normalizeSubbotSlotConfig(
       rawSlots[index],
       index + 1,
@@ -187,9 +225,7 @@ function ensureSubbotSettings(currentSettings) {
     currentSettings.subbot.publicRequests = true;
   }
 
-  if (currentSettings.subbot.maxSlots !== MAX_SUBBOT_SLOTS) {
-    currentSettings.subbot.maxSlots = MAX_SUBBOT_SLOTS;
-  }
+  currentSettings.subbot.maxSlots = getConfiguredSubbotSlotsCount(currentSettings);
 
   currentSettings.subbots = buildSubbotSlotConfigs(currentSettings).map((slot) => ({
     slot: slot.slot,
@@ -205,11 +241,24 @@ function ensureSubbotSettings(currentSettings) {
   }));
 }
 
+function ensureSystemSettings(currentSettings) {
+  if (!isPlainObject(currentSettings?.system)) {
+    currentSettings.system = {};
+  }
+
+  currentSettings.system.maintenanceMode = normalizeMaintenanceMode(
+    currentSettings.system.maintenanceMode
+  );
+  currentSettings.system.maintenanceMessage =
+    String(currentSettings.system.maintenanceMessage || "").trim().slice(0, 240);
+}
+
 function saveSettingsFile() {
   fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2));
 }
 
 ensureSubbotSettings(settings);
+ensureSystemSettings(settings);
 
 // ================= INFO CHANNEL =================
 
@@ -232,6 +281,9 @@ global.channelInfo = settings?.newsletter?.enabled
 const TMP_DIR = path.join(process.cwd(), "tmp");
 
 try {
+  if (!fs.existsSync(DATABASE_DIR)) {
+    fs.mkdirSync(DATABASE_DIR, { recursive: true });
+  }
   if (!fs.existsSync(TMP_DIR)) {
     fs.mkdirSync(TMP_DIR, { recursive: true });
   }
@@ -557,7 +609,11 @@ function getSubbotConfigById(botId) {
   }
 
   const asSlot = Number.parseInt(normalized, 10);
-  if (Number.isInteger(asSlot) && asSlot >= 1 && asSlot <= MAX_SUBBOT_SLOTS) {
+  if (
+    Number.isInteger(asSlot) &&
+    asSlot >= 1 &&
+    asSlot <= getConfiguredSubbotSlotsCount(settings)
+  ) {
     return getSubbotConfigBySlot(asSlot);
   }
 
@@ -624,6 +680,135 @@ const mensajesPorTipo = {
   Privado: 0,
   Desconocido: 0,
 };
+
+function safeReadJson(filePath, fallback) {
+  try {
+    if (!fs.existsSync(filePath)) return fallback;
+    const raw = fs.readFileSync(filePath, "utf-8");
+    const parsed = JSON.parse(raw);
+    return typeof parsed === "string" ? JSON.parse(parsed) : parsed;
+  } catch {
+    return fallback;
+  }
+}
+
+function normalizeUsageStats(data = {}) {
+  const source = isPlainObject(data) ? data : {};
+
+  return {
+    trackedSince:
+      String(source.trackedSince || "").trim() ||
+      new Date().toISOString(),
+    totalMessages: Number(source.totalMessages || 0),
+    totalCommands: Number(source.totalCommands || 0),
+    commandUsage: isPlainObject(source.commandUsage) ? source.commandUsage : {},
+    chatUsage: isPlainObject(source.chatUsage) ? source.chatUsage : {},
+    userUsage: isPlainObject(source.userUsage) ? source.userUsage : {},
+    botUsage: isPlainObject(source.botUsage) ? source.botUsage : {},
+  };
+}
+
+const usageStats = normalizeUsageStats(safeReadJson(USAGE_STATS_FILE, {}));
+let usageStatsSaveTimer = null;
+
+function scheduleUsageStatsSave() {
+  if (usageStatsSaveTimer) return;
+
+  usageStatsSaveTimer = setTimeout(() => {
+    usageStatsSaveTimer = null;
+
+    try {
+      fs.writeFileSync(USAGE_STATS_FILE, JSON.stringify(usageStats, null, 2));
+    } catch {}
+  }, 2000);
+
+  usageStatsSaveTimer.unref?.();
+}
+
+function incrementUsageCounter(container, key, updates = {}) {
+  if (!key) return;
+
+  const current = isPlainObject(container[key]) ? container[key] : {};
+  const next = { ...current };
+
+  for (const [field, incrementBy] of Object.entries(updates)) {
+    next[field] = Number(next[field] || 0) + Number(incrementBy || 0);
+  }
+
+  container[key] = next;
+}
+
+function trackMessageUsage(botState, message) {
+  const senderId = normalizeJidUser(message?.sender || "");
+  const chatId = String(message?.from || "").trim();
+  const botId = String(botState?.config?.id || "main");
+
+  usageStats.totalMessages += 1;
+  incrementUsageCounter(usageStats.chatUsage, chatId, {
+    messages: 1,
+    commands: 0,
+  });
+  incrementUsageCounter(usageStats.userUsage, senderId, {
+    messages: 1,
+    commands: 0,
+  });
+  incrementUsageCounter(usageStats.botUsage, botId, {
+    messages: 1,
+    commands: 0,
+  });
+  scheduleUsageStatsSave();
+}
+
+function trackCommandUsage(botState, message, commandName) {
+  const senderId = normalizeJidUser(message?.sender || "");
+  const chatId = String(message?.from || "").trim();
+  const botId = String(botState?.config?.id || "main");
+  const normalizedCommand = String(commandName || "").trim().toLowerCase();
+
+  usageStats.totalCommands += 1;
+  usageStats.commandUsage[normalizedCommand] =
+    Number(usageStats.commandUsage[normalizedCommand] || 0) + 1;
+  incrementUsageCounter(usageStats.chatUsage, chatId, { commands: 1 });
+  incrementUsageCounter(usageStats.userUsage, senderId, { commands: 1 });
+  incrementUsageCounter(usageStats.botUsage, botId, { commands: 1 });
+  scheduleUsageStatsSave();
+}
+
+function sortUsageMap(container = {}, field, limit = 5) {
+  return Object.entries(container)
+    .map(([id, value]) => ({
+      id,
+      value: Number(value?.[field] || 0),
+      meta: value,
+    }))
+    .filter((entry) => entry.value > 0)
+    .sort((a, b) => b.value - a.value)
+    .slice(0, limit);
+}
+
+function getUsageStatsSnapshot(limit = 5) {
+  return {
+    trackedSince: usageStats.trackedSince,
+    totalMessages: Number(usageStats.totalMessages || 0),
+    totalCommands: Number(usageStats.totalCommands || 0),
+    messagesByType: {
+      ...mensajesPorTipo,
+    },
+    topCommands: Object.entries(usageStats.commandUsage || {})
+      .map(([command, count]) => ({
+        command,
+        count: Number(count || 0),
+      }))
+      .filter((entry) => entry.count > 0)
+      .sort((a, b) => b.count - a.count)
+      .slice(0, limit),
+    topChatsByMessages: sortUsageMap(usageStats.chatUsage, "messages", limit),
+    topChatsByCommands: sortUsageMap(usageStats.chatUsage, "commands", limit),
+    topUsersByMessages: sortUsageMap(usageStats.userUsage, "messages", limit),
+    topUsersByCommands: sortUsageMap(usageStats.userUsage, "commands", limit),
+    bots: sortUsageMap(usageStats.botUsage, "commands", limit),
+  };
+}
 
 // ================= CONSOLA =================
 
@@ -763,6 +948,7 @@ function ensureBotState(config) {
 
 function refreshBotConfigCache() {
   ensureSubbotSettings(settings);
+  ensureSystemSettings(settings);
   SUBBOT_SLOT_CONFIGS = buildSubbotSlotConfigs(settings);
   BOT_CONFIGS = buildBotConfigs(settings);
 
@@ -783,7 +969,11 @@ function refreshBotConfigCache() {
 
 function saveSubbotSlotConfig(slotNumber, updates = {}) {
   const slot = Number(slotNumber);
-  if (!Number.isInteger(slot) || slot < 1 || slot > MAX_SUBBOT_SLOTS) {
+  if (
+    !Number.isInteger(slot) ||
+    slot < 1 ||
+    slot > getConfiguredSubbotSlotsCount(settings)
+  ) {
     return null;
   }
 
@@ -851,7 +1041,11 @@ function releaseSubbotSlot(botState, options = {}) {
   }
 
   const slot = Number(botState?.config?.slot || 0);
-  if (!Number.isInteger(slot) || slot < 1 || slot > MAX_SUBBOT_SLOTS) {
+  if (
+    !Number.isInteger(slot) ||
+    slot < 1 ||
+    slot > getConfiguredSubbotSlotsCount(settings)
+  ) {
     return false;
   }
 
@@ -1061,6 +1255,159 @@ async function canRunCommand(cmd, context) {
   }
 
   return true;
+}
+
+function getMaintenanceState() {
+  const mode = normalizeMaintenanceMode(settings?.system?.maintenanceMode);
+  const message = String(settings?.system?.maintenanceMessage || "").trim();
+
+  return {
+    enabled: mode !== "off",
+    mode,
+    message,
+    label:
+      mode === "owner_only"
+        ? "SOLO OWNER"
+        : mode === "downloads_off"
+          ? "DESCARGAS EN PAUSA"
+          : "APAGADO",
+    ownerOnly: mode === "owner_only",
+    downloadsBlocked: mode === "downloads_off",
+  };
+}
+
+function setMaintenanceState(mode, message = "") {
+  ensureSystemSettings(settings);
+  settings.system.maintenanceMode = normalizeMaintenanceMode(mode);
+  settings.system.maintenanceMessage = String(message || "").trim().slice(0, 240);
+  saveSettingsFile();
+  refreshBotConfigCache();
+  return getMaintenanceState();
+}
+
+function isDownloadCommand(cmd) {
+  const category = String(cmd?.category || "").trim().toLowerCase();
+  return category === "descarga" || category === "descargas" || category === "busqueda";
+}
+
+async function isBlockedByMaintenance(cmd, context) {
+  if (context.esOwner) return false;
+
+  const maintenance = getMaintenanceState();
+  if (!maintenance.enabled) return false;
+
+  let text = "";
+
+  if (maintenance.ownerOnly) {
+    text = "El bot esta en mantenimiento. Solo el owner puede usar comandos ahora.";
+  } else if (maintenance.downloadsBlocked && isDownloadCommand(cmd)) {
+    text = "Las descargas estan en mantenimiento temporal. Intenta otra vez mas tarde.";
+  }
+
+  if (!text) return false;
+
+  if (maintenance.message) {
+    text += `\n\n${maintenance.message}`;
+  }
+
+  await context.sock.sendMessage(
+    context.from,
+    {
+      text,
+      ...global.channelInfo,
+    },
+    getQuoteOptions(context.msg)
+  );
+
+  return true;
+}
+
+function quoteForShell(value) {
+  return `"${String(value || "").replace(/"/g, '\\"')}"`;
+}
+
+function quoteForSh(value) {
+  return `'${String(value || "").replace(/'/g, `'\"'\"'`)}'`;
+}
+
+function getRestartMode() {
+  if (process.env.pm_id || process.env.PM2_HOME) {
+    return {
+      kind: "pm2",
+      label: "PM2/VPS",
+      needsBootstrap: false,
+    };
+  }
+
+  if (
+    process.env.RAILWAY_ENVIRONMENT ||
+    process.env.RENDER ||
+    process.env.PTERODACTYL_SERVER_UUID ||
+    process.env.SERVER_ID ||
+    process.env.KOYEB_SERVICE_NAME ||
+    process.env.DYNO
+  ) {
+    return {
+      kind: "managed",
+      label: "Hosting administrado",
+      needsBootstrap: false,
+    };
+  }
+
+  return {
+    kind: "self",
+    label: "Node directo / VPS",
+    needsBootstrap: true,
+  };
+}
+
+function buildRestartBootstrap(delayMs = PROCESS_RESTART_DELAY_MS) {
+  const args = process.argv.slice(1);
+
+  if (process.platform === "win32") {
+    const waitSeconds = Math.max(1, Math.ceil(delayMs / 1000));
+    const command = [
+      `timeout /t ${waitSeconds} >nul`,
+      `${quoteForShell(process.execPath)} ${args.map(quoteForShell).join(" ")}`,
+    ].join(" && ");
+
+    return {
+      command: "cmd.exe",
+      args: ["/c", command],
+    };
+  }
+
+  const waitSeconds = Math.max(1, Math.ceil(delayMs / 1000));
+  const command = [
+    `sleep ${waitSeconds}`,
+    `${quoteForSh(process.execPath)} ${args.map(quoteForSh).join(" ")}`,
+  ].join("; ");
+
+  return {
+    command: "sh",
+    args: ["-c", command],
+  };
+}
+
+function scheduleProcessRestart(delayMs = PROCESS_RESTART_DELAY_MS) {
+  const restartMode = getRestartMode();
+
+  if (restartMode.needsBootstrap) {
+    const bootstrap = buildRestartBootstrap(delayMs);
+    const child = spawn(bootstrap.command, bootstrap.args, {
+      cwd: process.cwd(),
+      env: process.env,
+      detached: true,
+      stdio: "ignore",
+    });
+    child.unref();
+  }
+
+  setTimeout(() => {
+    process.kill(process.pid, "SIGINT");
+  }, restartMode.needsBootstrap ? 1200 : delayMs).unref?.();
+
+  return restartMode;
 }
 
 function scheduleReconnect(botState, ms = 2500) {
@@ -1500,6 +1847,72 @@ async function requestPairingCodeSafe(botState) {
   );
 }
 
+function buildSubbotRequestState() {
+  const summaries = SUBBOT_SLOT_CONFIGS.map((config) => summarizeBotConfig(config));
+
+  return {
+    publicRequests: settings?.subbot?.publicRequests !== false,
+    maxSlots: Number(settings?.subbot?.maxSlots || getConfiguredSubbotSlotsCount(settings)),
+    enabledSlots: SUBBOT_SLOT_CONFIGS.filter((config) => config.enabled).length,
+    availableSlots: summaries.filter(
+      (bot) =>
+        !bot.connected &&
+        !bot.registered &&
+        !bot.pairingPending &&
+        !getSubbotAssignedNumber(bot)
+    ).length,
+    activeSlots: summaries.filter((bot) => bot.connected).length,
+  };
+}
+
+function setSubbotMaxSlots(nextValue) {
+  const nextSlots = clampSubbotSlots(nextValue);
+  const currentSlots = getConfiguredSubbotSlotsCount(settings);
+
+  if (nextSlots === currentSlots) {
+    return {
+      ok: true,
+      changed: false,
+      state: buildSubbotRequestState(),
+    };
+  }
+
+  if (nextSlots < currentSlots) {
+    const blockedSlots = SUBBOT_SLOT_CONFIGS
+      .map((config) => summarizeBotConfig(config))
+      .filter(
+        (bot) =>
+          bot.slot > nextSlots &&
+          (bot.connected ||
+            bot.registered ||
+            bot.pairingPending ||
+            bot.enabled ||
+            getSubbotAssignedNumber(bot))
+      )
+      .map((bot) => bot.slot);
+
+    if (blockedSlots.length) {
+      return {
+        ok: false,
+        status: "slots_busy",
+        message: `No puedo reducir slots porque siguen ocupados: ${blockedSlots.join(", ")}.`,
+      };
+    }
+  }
+
+  ensureSubbotSettings(settings);
+  settings.subbot.maxSlots = nextSlots;
+  ensureSubbotSettings(settings);
+  saveSettingsFile();
+  refreshBotConfigCache();
+
+  return {
+    ok: true,
+    changed: true,
+    state: buildSubbotRequestState(),
+  };
+}
+
 global.botRuntime = {
   requestBotPairingCode: async (botId, options = {}) => {
     const requestedBotId = String(botId || "").trim().toLowerCase();
@@ -1603,6 +2016,15 @@ global.botRuntime = {
     });
   },
   isMainReady: () => isMainBotReady(),
+  restartProcess: (delayMs = PROCESS_RESTART_DELAY_MS) =>
+    scheduleProcessRestart(delayMs),
+  getRestartMode: () => getRestartMode(),
+  getConsoleLines: (limit = 25) =>
+    global.consoleBuffer.slice(-Math.max(1, Math.min(80, Number(limit || 25)))),
+  getUsageStats: (limit = 5) =>
+    getUsageStatsSnapshot(Math.max(1, Math.min(15, Number(limit || 5)))),
+  getMaintenanceState: () => getMaintenanceState(),
+  setMaintenanceState: (mode, message = "") => setMaintenanceState(mode, message),
   listBots: (options = {}) => {
     const includeMain = options?.includeMain === true;
     const onlyConnected = options?.onlyConnected === true;
@@ -1617,46 +2039,55 @@ global.botRuntime = {
     const mainBot = summarizeBotConfig(buildMainBotConfig(settings));
     return [mainBot, ...subbots].filter((bot) => !onlyConnected || bot.connected);
   },
-  getSubbotRequestState: () => ({
-    publicRequests: settings?.subbot?.publicRequests !== false,
-    maxSlots: Number(settings?.subbot?.maxSlots || MAX_SUBBOT_SLOTS),
-    enabledSlots: SUBBOT_SLOT_CONFIGS.filter((config) => config.enabled).length,
-    availableSlots: SUBBOT_SLOT_CONFIGS
-      .map((config) => summarizeBotConfig(config))
-      .filter(
-        (bot) =>
-          !bot.connected &&
-          !bot.registered &&
-          !bot.pairingPending &&
-          !getSubbotAssignedNumber(bot)
-      ).length,
-    activeSlots: SUBBOT_SLOT_CONFIGS
-      .map((config) => summarizeBotConfig(config))
-      .filter((bot) => bot.connected).length,
-  }),
+  getBotSummary: (botId) => {
+    const targetConfig = getBotConfigById(botId);
+    return targetConfig ? summarizeBotConfig(targetConfig) : null;
+  },
+  releaseSubbot: (botId, options = {}) => {
+    const targetConfig = getSubbotConfigById(botId);
+    if (!targetConfig) {
+      return {
+        ok: false,
+        status: "missing_bot",
+        message: "No encontre ese subbot.",
+      };
+    }
+
+    const targetState = ensureBotState(targetConfig);
+    const released = releaseSubbotSlot(targetState, {
+      reason: options?.reason || "manual",
+      closeSocket: options?.closeSocket !== false,
+      resetAuthFolder: options?.resetAuthFolder !== false,
+    });
+
+    return released
+      ? {
+          ok: true,
+          status: "released",
+          bot: summarizeBotConfig(getSubbotConfigBySlot(targetConfig.slot) || targetConfig),
+        }
+      : {
+          ok: false,
+          status: "release_failed",
+          message: "No pude liberar el slot solicitado.",
+        };
+  },
+  resetSubbot: (botId) => {
+    return global.botRuntime.releaseSubbot(botId, {
+      reason: "reset_manual",
+      closeSocket: true,
+      resetAuthFolder: true,
+    });
+  },
+  setSubbotMaxSlots: (count) => setSubbotMaxSlots(count),
+  getSubbotRequestState: () => buildSubbotRequestState(),
   setSubbotPublicRequests: (enabled) => {
     ensureSubbotSettings(settings);
     settings.subbot.publicRequests = Boolean(enabled);
     saveSettingsFile();
     refreshBotConfigCache();
 
-    return {
-      publicRequests: settings.subbot.publicRequests,
-      maxSlots: Number(settings.subbot.maxSlots || MAX_SUBBOT_SLOTS),
-      enabledSlots: SUBBOT_SLOT_CONFIGS.filter((config) => config.enabled).length,
-      availableSlots: SUBBOT_SLOT_CONFIGS
-        .map((config) => summarizeBotConfig(config))
-        .filter(
-          (bot) =>
-            !bot.connected &&
-            !bot.registered &&
-            !bot.pairingPending &&
-            !getSubbotAssignedNumber(bot)
-        ).length,
-      activeSlots: SUBBOT_SLOT_CONFIGS
-        .map((config) => summarizeBotConfig(config))
-        .filter((bot) => bot.connected).length,
-    };
+    return buildSubbotRequestState();
   },
 };
 
@@ -1676,6 +2107,7 @@ async function handleIncomingMessages(botState, sock, messages) {
       if (!texto) continue;
 
       totalMensajes++;
+      trackMessageUsage(botState, m);
 
       const tipo = tipoChat(from);
       mensajesPorTipo[tipo] = (mensajesPorTipo[tipo] || 0) + 1;
@@ -1702,8 +2134,11 @@ async function handleIncomingMessages(botState, sock, messages) {
 
       const allowed = await canRunCommand(cmd, commandContext);
       if (!allowed) continue;
+      const blockedByMaintenance = await isBlockedByMaintenance(cmd, commandContext);
+      if (blockedByMaintenance) continue;
 
       totalComandos++;
+      trackCommandUsage(botState, m, commandData.commandName);
 
       await cmd.run(commandContext);
     } catch (err) {
@@ -1878,6 +2313,14 @@ async function start() {
 start();
 
 process.on("SIGINT", () => {
+  try {
+    if (usageStatsSaveTimer) {
+      clearTimeout(usageStatsSaveTimer);
+      usageStatsSaveTimer = null;
+    }
+    fs.writeFileSync(USAGE_STATS_FILE, JSON.stringify(usageStats, null, 2));
+  } catch {}
+
   try {
     rl.close();
   } catch {}

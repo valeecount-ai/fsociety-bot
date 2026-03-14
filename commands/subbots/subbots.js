@@ -60,6 +60,10 @@ export default {
           `Comandos:\n` +
           `${prefix}subbot 519xxxxxxxxx\n` +
           `${prefix}subbot 3 519xxxxxxxxx\n` +
+          `${prefix}subbot info 3\n` +
+          `${prefix}subbot liberar 3\n` +
+          `${prefix}subbot reset 3\n` +
+          `${prefix}subbot slots 20\n` +
           `${prefix}subbots\n` +
           `${prefix}subboton\n` +
           `${prefix}subbotoff`,

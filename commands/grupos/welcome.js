@@ -57,8 +57,8 @@ export default {
           text:
 `⚙️ *WELCOME (Bienvenida)*
 
-✅ *Activar:*  !welcome on
-🚫 *Desactivar:* !welcome off`,
+✅ *Activar:*  .welcome on
+🚫 *Desactivar:* .welcome off`,
           ...global.channelInfo
         },
         quoted

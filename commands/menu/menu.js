@@ -48,9 +48,9 @@ export default {
         const cat = String(cmd.category).toLowerCase();
 
         // ✅ tomar SOLO el primer comando (principal)
-        const principal = Array.isArray(cmd.command)
+        const principal = cmd.name || (Array.isArray(cmd.command)
           ? cmd.command[0]
-          : cmd.command;
+          : cmd.command);
 
         if (!principal) continue;
 
@@ -64,7 +64,7 @@ export default {
 │ ✦ *${settings.botName}* ✦
 ╰══════════════════════╯
 
-▸ _prefijo_ : *${settings.prefix}*
+▸ _prefijo_ : *${Array.isArray(settings.prefix) ? settings.prefix[0] : settings.prefix}*
 ▸ _estado_  : *online*
 ▸ _uptime_  : *${uptime}*
 
@@ -81,7 +81,7 @@ export default {
 │`;
 
         for (const c of lista) {
-          menu += `\n│  • \`${settings.prefix}${c}\``;
+          menu += `\n│  • \`${Array.isArray(settings.prefix) ? settings.prefix[0] : settings.prefix}${c}\``;
         }
 
         menu += `

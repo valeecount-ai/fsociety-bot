@@ -372,6 +372,16 @@ function restoreProtectedLocalFiles(backups = new Map()) {
   return restored;
 }
 
+async function resetProtectedLocalFilesToHead(filePaths = []) {
+  const targets = uniquePaths(filePaths).filter((filePath) => isProtectedLocalPath(filePath));
+  if (!targets.length) {
+    return 0;
+  }
+
+  await runCommand("git", ["restore", "--source=HEAD", "--worktree", "--staged", "--", ...targets]);
+  return targets.length;
+}
+
 async function findStashRefByLabel(label) {
   if (!label) return "";
 
@@ -568,6 +578,8 @@ export default {
     let stashCreated = false;
     let stashRestored = false;
     let stashPaths = [];
+    let protectedPaths = [];
+    let nonProtectedPaths = [];
     let protectedBackups = new Map();
 
     try {
@@ -607,10 +619,19 @@ export default {
       const status = await getRepoStatus(settings);
       if (status.blockingLines.length) {
         stashPaths = uniquePaths(status.blockingLines.map((line) => extractGitStatusPath(line)));
-        protectedBackups = backupProtectedLocalFiles(stashPaths);
-        const stash = await stashWorkspaceIfNeeded("workspace", stashPaths);
-        stashLabel = stash.label;
-        stashCreated = stash.created;
+        protectedPaths = stashPaths.filter((filePath) => isProtectedLocalPath(filePath));
+        nonProtectedPaths = stashPaths.filter((filePath) => !isProtectedLocalPath(filePath));
+        protectedBackups = backupProtectedLocalFiles(protectedPaths);
+
+        if (protectedPaths.length) {
+          await resetProtectedLocalFilesToHead(protectedPaths);
+        }
+
+        if (nonProtectedPaths.length) {
+          const stash = await stashWorkspaceIfNeeded("workspace", nonProtectedPaths);
+          stashLabel = stash.label;
+          stashCreated = stash.created;
+        }
       }
 
       const currentBranch = (
@@ -665,10 +686,12 @@ export default {
 
       if (stashCreated) {
         await restoreWorkspaceFromStash(stashLabel, {
-          filePaths: stashPaths,
+          filePaths: nonProtectedPaths,
           protectedBackups,
         });
         stashRestored = true;
+      } else if (protectedBackups.size) {
+        restoreProtectedLocalFiles(protectedBackups);
       }
 
       if (!updated && !forceRestart) {
@@ -702,7 +725,9 @@ export default {
         ? protectedBackups.size
           ? "Cambios locales: *guardados y config local conservada*"
           : "Cambios locales: *guardados y restaurados*"
-        : "Cambios locales: *limpio*";
+        : protectedBackups.size
+          ? "Cambios locales: *config local conservada*"
+          : "Cambios locales: *limpio*";
 
       await sock.sendMessage(
         from,
@@ -729,10 +754,14 @@ export default {
       if (stashCreated && !stashRestored && stashLabel) {
         try {
           await restoreWorkspaceFromStash(stashLabel, {
-            filePaths: stashPaths,
+            filePaths: nonProtectedPaths,
             protectedBackups,
           });
           stashRestored = true;
+        } catch {}
+      } else if (protectedBackups.size) {
+        try {
+          restoreProtectedLocalFiles(protectedBackups);
         } catch {}
       }
 

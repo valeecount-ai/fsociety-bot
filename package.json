@@ -12,7 +12,7 @@
     "pm2:split:restart": "pm2 restart ecosystem.config.cjs"
   },
   "dependencies": {
-    "@whiskeysockets/baileys": "6.7.21",
+    "@whiskeysockets/baileys": "npm:wileys@latest",
     "axios": "^1.6.0",
     "chalk": "^4.1.2",
     "figlet": "^1.9.3",

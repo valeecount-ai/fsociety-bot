@@ -1,9 +1,5 @@
 import fs from "fs";
 import path from "path";
-import { fileURLToPath } from "url";
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 
 function formatUptime(seconds) {
   const h = Math.floor(seconds / 3600);
@@ -61,7 +57,7 @@ function getCategoryIcon(category = "") {
 
 function buildTopPanel({ settings, uptime, totalCategories, totalCommands, prefixLabel }) {
   return [
-    "╭━━━〔 𝙈𝙀𝙉𝙐 𝙋𝙍𝙄𝙉𝘾𝙄𝙋𝘼𝙇 〕━━━⬣",
+    "╭━━━〔 MENU PRINCIPAL 〕━━━⬣",
     `┃ ✦ Bot: *${settings.botName || "BOT"}*`,
     `┃ ✦ Owner: *${settings.ownerName || "Owner"}*`,
     `┃ ✦ Prefijos: *${prefixLabel}*`,
@@ -86,33 +82,39 @@ function buildCategoryBlock(category, commands, primaryPrefix) {
 
 function buildFooter(primaryPrefix) {
   return [
-    "╭─〔 𝙉𝙊𝙏𝘼𝙎 〕",
+    "╭─〔 NOTAS 〕",
     `│ • Usa \`${primaryPrefix}status\` para ver el estado del bot`,
     `│ • Usa \`${primaryPrefix}owner\` si necesitas soporte directo`,
     "╰────────────⬣",
   ].join("\n");
 }
 
+function resolveMenuImagePath() {
+  const base = path.join(process.cwd(), "imagenes", "menu");
+  const candidates = [`${base}.png`, `${base}.jpg`, `${base}.jpeg`, `${base}.webp`];
+  return candidates.find((filePath) => fs.existsSync(filePath)) || "";
+}
+
 export default {
   command: ["menu"],
   category: "menu",
-  description: "Menu principal con diseno premium",
+  description: "Menu principal con imagen",
 
   run: async ({ sock, msg, from, settings, comandos }) => {
     try {
       if (!comandos) {
         return sock.sendMessage(
           from,
-          { text: "❌ error interno", ...global.channelInfo },
+          { text: "Error interno del menu.", ...global.channelInfo },
           { quoted: msg }
         );
       }
 
-      const videoPath = path.join(process.cwd(), "videos", "menu-video.mp4");
-      if (!fs.existsSync(videoPath)) {
+      const imagePath = resolveMenuImagePath();
+      if (!imagePath) {
         return sock.sendMessage(
           from,
-          { text: "❌ video del menu no encontrado", ...global.channelInfo },
+          { text: "Imagen del menu no encontrada en imagenes/menu.png.", ...global.channelInfo },
           { quoted: msg }
         );
       }
@@ -125,12 +127,12 @@ export default {
       for (const cmd of new Set(comandos.values())) {
         if (!cmd?.category || !cmd?.command) continue;
 
-        const cat = String(cmd.category).toLowerCase();
+        const category = String(cmd.category).toLowerCase();
         const principal = cmd.name || (Array.isArray(cmd.command) ? cmd.command[0] : cmd.command);
         if (!principal) continue;
 
-        if (!categorias[cat]) categorias[cat] = new Set();
-        categorias[cat].add(String(principal).toLowerCase());
+        if (!categorias[category]) categorias[category] = new Set();
+        categorias[category].add(String(principal).toLowerCase());
       }
 
       const categoryNames = Object.keys(categorias).sort();
@@ -156,19 +158,17 @@ export default {
       await sock.sendMessage(
         from,
         {
-          video: fs.readFileSync(videoPath),
-          mimetype: "video/mp4",
-          gifPlayback: true,
+          image: fs.readFileSync(imagePath),
           caption: parts.join("\n\n").trim(),
           ...global.channelInfo,
         },
         { quoted: msg }
       );
-    } catch (err) {
-      console.error("MENU ERROR:", err);
+    } catch (error) {
+      console.error("MENU ERROR:", error);
       await sock.sendMessage(
         from,
-        { text: "❌ error al mostrar el menu", ...global.channelInfo },
+        { text: "Error al mostrar el menu.", ...global.channelInfo },
         { quoted: msg }
       );
     }

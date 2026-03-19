@@ -3388,12 +3388,6 @@ async function handleIncomingMessages(botState, sock, messages) {
       // ignoring its normal replies to avoid self-triggered loops.
       if (isFromMe && !commandData) continue;
 
-      if (/^([./!#])(catalogoprueba|catalogotest|menulista|menu)\b/i.test(texto)) {
-        console.log(
-          `${getBotTag(botState)} RX comando chat=${from} fromMe=${isFromMe} texto=${texto}`
-        );
-      }
-
       totalMensajes++;
       trackMessageUsage(botState, m);
 
@@ -3408,12 +3402,6 @@ async function handleIncomingMessages(botState, sock, messages) {
 
       if (!commandData) continue;
       failedCommandName = commandData.commandName;
-
-      if (["catalogoprueba", "catalogotest", "menulista", "menu"].includes(commandData.commandName)) {
-        console.log(
-          `${getBotTag(botState)} Ejecutando comando=${commandData.commandName} fromMe=${isFromMe}`
-        );
-      }
 
       const cmd = comandos.get(commandData.commandName);
       if (!cmd) continue;

@@ -3374,7 +3374,6 @@ async function handleIncomingMessages(botState, sock, messages) {
 
     try {
       if (!raw?.message) continue;
-      if (raw?.key?.fromMe) continue;
 
       const from = raw?.key?.remoteJid || "";
       if (shouldIgnoreJid(from)) continue;
@@ -3382,6 +3381,12 @@ async function handleIncomingMessages(botState, sock, messages) {
       const m = serializeMessage(raw);
       const texto = String(m?.text || "").trim();
       if (!texto) continue;
+      const commandData = extractCommandData(texto, settings);
+      const isFromMe = Boolean(raw?.key?.fromMe);
+
+      // Allow testing commands sent from the bot's own account while
+      // ignoring its normal replies to avoid self-triggered loops.
+      if (isFromMe && !commandData) continue;
 
       totalMensajes++;
       trackMessageUsage(botState, m);
@@ -3395,7 +3400,6 @@ async function handleIncomingMessages(botState, sock, messages) {
       const blockedByHook = await runMessageHooks(botState, baseContext);
       if (blockedByHook) continue;
 
-      const commandData = extractCommandData(texto, settings);
       if (!commandData) continue;
       failedCommandName = commandData.commandName;
 
@@ -3605,11 +3609,18 @@ async function iniciarInstanciaBot(config) {
     });
 
     sock.ev.on("messages.upsert", async ({ messages, type }) => {
-      if (type && type !== "notify") {
+      if (type && type !== "notify" && type !== "append") {
         return;
       }
 
-      await handleIncomingMessages(botState, sock, messages);
+      const filteredMessages = (messages || []).filter((raw) => {
+        if (!raw?.message) return false;
+        if (type === "notify") return true;
+        return Boolean(raw?.key?.fromMe);
+      });
+
+      if (!filteredMessages.length) return;
+      await handleIncomingMessages(botState, sock, filteredMessages);
     });
 
     sock.ev.on("messages.delete", async (update) => {

@@ -288,6 +288,7 @@ export default {
         number: targetNumber,
         requesterNumber: targetNumber,
         requesterJid: String(sender || ""),
+        bypassPublicRequests: Boolean(esOwner),
         useCache: true,
       }
     );

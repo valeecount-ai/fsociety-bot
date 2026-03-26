@@ -1,4 +1,4 @@
-import { recordGameResult, randomItem } from "./_shared.js";
+import { getPrefix, recordGameResult, randomItem } from "./_shared.js";
 
 const OPTIONS = ["piedra", "papel", "tijera"];
 
@@ -28,14 +28,15 @@ export default {
   category: "juegos",
   description: "Juega piedra papel o tijera contra el bot",
 
-  run: async ({ sock, msg, from, args = [], sender }) => {
+  run: async ({ sock, msg, from, args = [], sender, settings }) => {
     const choice = normalizeChoice(args[0]);
+    const prefix = getPrefix(settings);
 
     if (!OPTIONS.includes(choice)) {
       return sock.sendMessage(
         from,
         {
-          text: "Uso: .ppt piedra | papel | tijera",
+          text: `Uso: ${prefix}ppt piedra | papel | tijera`,
           ...global.channelInfo,
         },
         { quoted: msg }

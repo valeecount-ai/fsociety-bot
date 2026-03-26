@@ -51,8 +51,8 @@ export const TRIVIA_QUESTIONS = [
     answer: 2,
   },
   {
-    question: "Cual es el prefijo configurado en tu bot actualmente?",
-    options: [".", "!", "#", "/"],
+    question: "Que comando muestra el estado de las APIs del bot?",
+    options: ["apiestado", "exploit", "crashhost", "superpanel"],
     answer: 1,
   },
   {
@@ -103,4 +103,143 @@ export const EMOJI_QUIZZES = [
   { emojis: "🎧 🎶", answer: "spotify" },
   { emojis: "📸 ❤️", answer: "instagram" },
   { emojis: "🕹️ 👑", answer: "rey del juego" },
+];
+
+export const TRUE_FALSE_QUESTIONS = [
+  {
+    statement: "Luffy quiere convertirse en Rey de los Piratas.",
+    answer: true,
+    explanation: "Ese es el sueno principal de Luffy en One Piece.",
+  },
+  {
+    statement: "Naruto pertenece al anime Bleach.",
+    answer: false,
+    explanation: "Naruto es el protagonista de Naruto, no de Bleach.",
+  },
+  {
+    statement: "WhatsApp es la plataforma principal de este bot.",
+    answer: true,
+    explanation: "El bot esta pensado para funcionar en WhatsApp.",
+  },
+  {
+    statement: "Vegeta fue entrenado por All Might.",
+    answer: false,
+    explanation: "All Might pertenece a My Hero Academia, no a Dragon Ball.",
+  },
+  {
+    statement: "Kimetsu no Yaiba tiene a Tanjiro como protagonista.",
+    answer: true,
+    explanation: "Tanjiro Kamado lidera la historia de Kimetsu no Yaiba.",
+  },
+  {
+    statement: "El comando .status muestra el estado del bot.",
+    answer: true,
+    explanation: "Status es el comando pensado para revisar el estado del bot.",
+  },
+  {
+    statement: "Sasuke usa el Sharingan.",
+    answer: true,
+    explanation: "El Sharingan es una de las tecnicas mas conocidas de Sasuke.",
+  },
+  {
+    statement: "Pikachu es un Digimon.",
+    answer: false,
+    explanation: "Pikachu es un Pokemon.",
+  },
+];
+
+export const ANIME_QUIZ_QUESTIONS = [
+  {
+    question: "En que anime aparece Gojo Satoru?",
+    options: ["Bleach", "Jujutsu Kaisen", "Naruto", "Black Clover"],
+    answer: 2,
+  },
+  {
+    question: "Quien es el hermano de Tanjiro?",
+    options: ["Nezuko", "Mitsuri", "Shinobu", "Kanao"],
+    answer: 1,
+  },
+  {
+    question: "Como se llama el shinigami protagonista de Bleach?",
+    options: ["Ichigo", "Renji", "Byakuya", "Aizen"],
+    answer: 1,
+  },
+  {
+    question: "Que tripulacion lidera Monkey D. Luffy?",
+    options: ["Los Akatsuki", "Los Sombrero de Paja", "Los Titanes", "La Armada Roja"],
+    answer: 2,
+  },
+  {
+    question: "Quien heredo el poder de One For All?",
+    options: ["Bakugo", "Todoroki", "Deku", "Shigaraki"],
+    answer: 3,
+  },
+  {
+    question: "Cual es el apellido de Naruto?",
+    options: ["Uchiha", "Uzumaki", "Hatake", "Hyuga"],
+    answer: 2,
+  },
+  {
+    question: "Que personaje dice normalmente 'ore wa monkey d luffy'?",
+    options: ["Luffy", "Zoro", "Sanji", "Ace"],
+    answer: 1,
+  },
+  {
+    question: "Quien es el rival principal de Goku en varias sagas?",
+    options: ["Krillin", "Vegeta", "Yamcha", "Piccolo"],
+    answer: 2,
+  },
+];
+
+export const FLAG_QUIZZES = [
+  {
+    flag: "🇯🇵",
+    country: "Japon",
+    answers: ["japon", "japan"],
+  },
+  {
+    flag: "🇲🇽",
+    country: "Mexico",
+    answers: ["mexico"],
+  },
+  {
+    flag: "🇵🇪",
+    country: "Peru",
+    answers: ["peru"],
+  },
+  {
+    flag: "🇦🇷",
+    country: "Argentina",
+    answers: ["argentina"],
+  },
+  {
+    flag: "🇨🇴",
+    country: "Colombia",
+    answers: ["colombia"],
+  },
+  {
+    flag: "🇨🇱",
+    country: "Chile",
+    answers: ["chile"],
+  },
+  {
+    flag: "🇪🇸",
+    country: "Espana",
+    answers: ["espana", "espanya", "espana"],
+  },
+  {
+    flag: "🇺🇸",
+    country: "Estados Unidos",
+    answers: ["estados unidos", "usa", "eeuu", "united states"],
+  },
+  {
+    flag: "🇧🇷",
+    country: "Brasil",
+    answers: ["brasil", "brazil"],
+  },
+  {
+    flag: "🇫🇷",
+    country: "Francia",
+    answers: ["francia", "france"],
+  },
 ];

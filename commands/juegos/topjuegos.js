@@ -6,6 +6,10 @@ import {
   getPrefix,
 } from "./_shared.js";
 
+const GAME_ALIASES = {
+  quizanime: "quizanime",
+};
+
 const VALID_GAMES = new Set([
   "ppt",
   "adivina",
@@ -13,8 +17,12 @@ const VALID_GAMES = new Set([
   "mezclapalabra",
   "mate",
   "trivia",
+  "verdaderoofalso",
+  "quizanime",
   "emojiquiz",
+  "banderas",
   "tictactoe",
+  "ruleta",
 ]);
 
 export default {
@@ -29,7 +37,7 @@ export default {
     const second = String(args[1] || "").trim().toLowerCase();
 
     const isGroupRanking = first === "grupo" || first === "group";
-    const selectedGame = isGroupRanking ? second : first;
+    const selectedGame = GAME_ALIASES[isGroupRanking ? second : first] || (isGroupRanking ? second : first);
     const game = VALID_GAMES.has(selectedGame) ? selectedGame : "";
     const board = getGameLeaderboard({
       game,

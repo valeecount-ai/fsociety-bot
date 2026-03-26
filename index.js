@@ -1385,14 +1385,49 @@ let usageStatsSaveTimer = null;
 let managedBotSyncInterval = null;
 let autoCleanInterval = null;
 let dashboardServer = null;
-const DASHBOARD_AUTO_ENABLED = ["1", "true", "yes", "on"].includes(
-  String(process.env.DASHBOARD_ENABLED || "").trim().toLowerCase()
+const WEB_BRIDGE_TOKEN = String(process.env.WEB_BRIDGE_TOKEN || "").trim();
+
+function parseBooleanEnv(name, fallback = false) {
+  const raw = process.env[name];
+  if (raw === undefined) return fallback;
+
+  const normalized = String(raw).trim().toLowerCase();
+  return ["1", "true", "yes", "on", "si"].includes(normalized);
+}
+
+function parseNumberEnv(name, fallback) {
+  const parsed = Number(process.env[name]);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function normalizeHostValue(value = "") {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/^\[/, "")
+    .replace(/\]$/, "");
+}
+
+function isLoopbackHost(host = "") {
+  const normalized = normalizeHostValue(host);
+  return (
+    normalized === "127.0.0.1" ||
+    normalized === "::1" ||
+    normalized === "localhost"
+  );
+}
+
+const ALLOW_LOOPBACK_BRIDGE_WITHOUT_TOKEN = parseBooleanEnv(
+  "WEB_BRIDGE_ALLOW_LOOPBACK",
+  false
 );
+const DASHBOARD_AUTO_ENABLED = parseBooleanEnv("DASHBOARD_ENABLED", false);
 const DASHBOARD_AUTO_PORT = Math.max(
   1,
-  Math.min(65535, Number(process.env.DASHBOARD_PORT || 8787) || 8787)
+  Math.min(65535, parseNumberEnv("DASHBOARD_PORT", 8787) || 8787)
 );
-const DASHBOARD_AUTO_HOST = String(process.env.DASHBOARD_HOST || "0.0.0.0").trim() || "0.0.0.0";
+const DASHBOARD_AUTO_HOST =
+  String(process.env.DASHBOARD_HOST || "0.0.0.0").trim() || "0.0.0.0";
 let dashboardState = {
   enabled: DASHBOARD_AUTO_ENABLED,
   port: DASHBOARD_AUTO_PORT,
@@ -2643,7 +2678,41 @@ function scheduleReconnect(botState, ms = 2500) {
   }, ms);
 }
 
-function getDashboardSnapshot() {
+function maskDashboardNumber(value = "") {
+  const digits = sanitizePhoneNumber(value);
+  if (!digits) return "";
+
+  if (digits.length <= 4) {
+    return digits;
+  }
+
+  const visiblePrefix = digits.slice(0, Math.min(3, digits.length - 4));
+  const visibleSuffix = digits.slice(-4);
+  const hiddenCount = Math.max(
+    2,
+    digits.length - visiblePrefix.length - visibleSuffix.length
+  );
+
+  return `${visiblePrefix}${"*".repeat(hiddenCount)}${visibleSuffix}`;
+}
+
+function sanitizeDashboardBotSummary(bot = {}) {
+  return {
+    ...bot,
+    authFolder: "",
+    requesterJid: "",
+    configuredNumber: maskDashboardNumber(bot?.configuredNumber),
+    requesterNumber: maskDashboardNumber(bot?.requesterNumber),
+    cachedPairingCode: "",
+    cachedPairingNumber: "",
+    cachedPairingExpiresInMs: 0,
+  };
+}
+
+function getDashboardSnapshot(options = {}) {
+  const includeSensitive = options?.includeSensitive === true;
+  const bots = global.botRuntime?.listBots?.({ includeMain: true }) || [];
+
   return {
     pid: process.pid,
     uptimeSeconds: Math.floor(process.uptime()),
@@ -2652,7 +2721,7 @@ function getDashboardSnapshot() {
     totalMessages: totalMensajes,
     totalCommands: totalComandos,
     memory: process.memoryUsage(),
-    bots: global.botRuntime?.listBots?.({ includeMain: true }) || [],
+    bots: includeSensitive ? bots : bots.map((bot) => sanitizeDashboardBotSummary(bot)),
     usage: getUsageStatsSnapshot(10),
     weekly: getWeeklySnapshot(10),
     resilience: getResilienceSnapshot(),
@@ -2724,217 +2793,606 @@ function buildMainPairingSnapshot(result = null) {
   };
 }
 
-function ensureDashboardServer() {
-  if (!dashboardState.enabled || dashboardServer) return;
+function getPrimaryPrefix() {
+  if (Array.isArray(settings?.prefix)) {
+    return String(settings.prefix[0] || ".").trim() || ".";
+  }
 
-  dashboardServer = http.createServer(async (req, res) => {
-    const requestUrl = resolveRequestUrl(req);
-    const pathname = requestUrl.pathname;
-    const method = String(req?.method || "GET").trim().toUpperCase();
+  return String(settings?.prefix || ".").trim() || ".";
+}
 
-    if (pathname === "/internal/main/pairing") {
-      if (!["GET", "POST"].includes(method)) {
-        writeJson(res, 405, {
-          message: "Metodo no permitido.",
-        });
+function sendDashboardJson(res, statusCode, payload) {
+  const body = JSON.stringify(payload, null, 2);
+  res.writeHead(statusCode, {
+    "content-type": "application/json; charset=utf-8",
+    "cache-control": "no-store",
+    "content-length": Buffer.byteLength(body),
+  });
+  res.end(body);
+}
+
+function isLoopbackRequest(req) {
+  const remoteAddress = String(req?.socket?.remoteAddress || "")
+    .trim()
+    .toLowerCase();
+
+  return (
+    remoteAddress === "127.0.0.1" ||
+    remoteAddress === "::1" ||
+    remoteAddress.endsWith("127.0.0.1")
+  );
+}
+
+function isBridgeReady() {
+  if (WEB_BRIDGE_TOKEN) {
+    return true;
+  }
+
+  return (
+    ALLOW_LOOPBACK_BRIDGE_WITHOUT_TOKEN &&
+    isLoopbackHost(dashboardState.host)
+  );
+}
+
+function getBridgeUnavailableMessage() {
+  if (WEB_BRIDGE_TOKEN) {
+    return "";
+  }
+
+  if (
+    ALLOW_LOOPBACK_BRIDGE_WITHOUT_TOKEN &&
+    !isLoopbackHost(dashboardState.host)
+  ) {
+    return (
+      "El bridge sin token solo puede funcionar con DASHBOARD_HOST en " +
+      "127.0.0.1, ::1 o localhost."
+    );
+  }
+
+  return (
+    "Configura WEB_BRIDGE_TOKEN para usar el bridge web. " +
+    "Si solo lo usaras localmente, habilita WEB_BRIDGE_ALLOW_LOOPBACK=1 " +
+    "y deja DASHBOARD_HOST en 127.0.0.1."
+  );
+}
+
+function isBridgeAuthorized(req) {
+  if (!String(req?.url || "").startsWith("/bridge/")) {
+    return true;
+  }
+
+  if (WEB_BRIDGE_TOKEN) {
+    const authHeader = String(req?.headers?.authorization || "").trim();
+    const altToken = String(req?.headers?.["x-bridge-token"] || "").trim();
+
+    if (authHeader.startsWith("Bearer ")) {
+      return authHeader.slice(7).trim() === WEB_BRIDGE_TOKEN;
+    }
+
+    return altToken === WEB_BRIDGE_TOKEN;
+  }
+
+  return (
+    ALLOW_LOOPBACK_BRIDGE_WITHOUT_TOKEN &&
+    isLoopbackHost(dashboardState.host) &&
+    isLoopbackRequest(req)
+  );
+}
+
+function readJsonRequestBody(req, maxBytes = 32768) {
+  return new Promise((resolve, reject) => {
+    let size = 0;
+    const chunks = [];
+
+    req.on("data", (chunk) => {
+      size += chunk.length;
+
+      if (size > maxBytes) {
+        reject(new Error("payload_too_large"));
+        req.destroy();
         return;
       }
 
-      if (!INTERNAL_WEBHOOK_TOKEN) {
-        writeJson(res, 503, {
-          message: "Configura INTERNAL_WEBHOOK_TOKEN o BOT_WEBHOOK_TOKEN antes de exponer este endpoint.",
-        });
-        return;
-      }
+      chunks.push(chunk);
+    });
 
-      if (!isIpAllowed(req)) {
-        writeJson(res, 403, {
-          message: "IP no autorizada para el webhook interno.",
-        });
-        return;
-      }
+    req.on("end", () => {
+      const raw = Buffer.concat(chunks).toString("utf-8").trim();
 
-      if (
-        !isTokenAuthorized(req, INTERNAL_WEBHOOK_TOKEN, [
-          "x-bot-webhook-token",
-          "x-internal-token",
-        ])
-      ) {
-        writeJson(res, 401, {
-          message: "Token del webhook interno invalido.",
-        });
+      if (!raw) {
+        resolve({});
         return;
       }
 
       try {
-        if (method === "GET") {
-          writeJson(res, 200, {
-            ok: true,
-            ...buildMainPairingSnapshot(),
+        resolve(JSON.parse(raw));
+      } catch {
+        reject(new Error("invalid_json"));
+      }
+    });
+
+    req.on("error", reject);
+  });
+}
+
+function buildBridgeStatusPayload() {
+  const runtime = global.botRuntime;
+  const subbotState = runtime?.getSubbotRequestState?.() || {};
+
+  return {
+    ok: true,
+    source: "Fsociety bot runtime",
+    mainReady: Boolean(runtime?.isMainReady?.()),
+    publicRequests: Boolean(subbotState.publicRequests),
+    maxSlots: Number(subbotState.maxSlots || 0),
+    enabledSlots: Number(subbotState.enabledSlots || subbotState.maxSlots || 0),
+    availableSlots: Number(subbotState.availableSlots || 0),
+    activeSlots: Number(subbotState.activeSlots || 0),
+    processMode: PROCESS_MODE_LABEL,
+    commandsLoaded: comandos.size,
+  };
+}
+
+function buildBridgeChatReply(mensaje = "", usuario = "web-user") {
+  const normalized = String(mensaje || "").trim().toLowerCase();
+  const runtime = global.botRuntime;
+  const subbotState = runtime?.getSubbotRequestState?.() || {};
+  const prefix = getPrimaryPrefix();
+  const mainReady = runtime?.isMainReady?.() ? "listo" : "pendiente";
+
+  if (!normalized) {
+    return "Escribe un mensaje para consultar el estado del bot.";
+  }
+
+  if (/(ayuda|help|menu|opciones)/.test(normalized)) {
+    return (
+      `Hola ${usuario}. Desde esta web puedes consultar estado del bot, revisar capacidad y pedir un subbot.` +
+      `\n\nComandos utiles:` +
+      `\n- Escribe "estado general"` +
+      `\n- Escribe "slots disponibles"` +
+      `\n- Usa el formulario de solicitud de subbot con tu numero` +
+      `\n- En WhatsApp tambien puedes usar: ${prefix}subbot 51912345678`
+    );
+  }
+
+  if (/(estado|status|resumen|health)/.test(normalized)) {
+    return (
+      `Estado del runtime:` +
+      `\n- Bot principal: ${mainReady}` +
+      `\n- Solicitudes publicas: ${subbotState.publicRequests ? "encendidas" : "apagadas"}` +
+      `\n- Slots libres: ${Number(subbotState.availableSlots || 0)}` +
+      `\n- Slots activos: ${Number(subbotState.activeSlots || 0)}` +
+      `\n- Capacidad total: ${Number(subbotState.maxSlots || 0)}`
+    );
+  }
+
+  if (/(subbot|slot|slots|capacidad|pairing|codigo)/.test(normalized)) {
+    return (
+      `Subbots disponibles ahora:` +
+      `\n- Public requests: ${subbotState.publicRequests ? "ON" : "OFF"}` +
+      `\n- Slots libres: ${Number(subbotState.availableSlots || 0)}` +
+      `\n- Slots activos: ${Number(subbotState.activeSlots || 0)}` +
+      `\n\nSi quieres un codigo real, usa el formulario web o el comando ${prefix}subbot 51912345678.`
+    );
+  }
+
+  return (
+    `Recibi tu mensaje, ${usuario}. El bridge web esta conectado al runtime del bot.` +
+    `\n\nSi quieres pedir un subbot, usa el formulario de la web con tu numero o el comando ${prefix}subbot 51912345678 en WhatsApp.`
+  );
+}
+
+function resolveBridgeSubbotError(result = {}, maxSlots = 15) {
+  if (result?.status === "missing_bot") {
+    return `No encontre ese slot. Usa un valor entre 1 y ${maxSlots}.`;
+  }
+
+  if (result?.status === "no_capacity") {
+    return "No hay slots libres para crear otro subbot ahora mismo.";
+  }
+
+  if (result?.status === "slot_busy") {
+    return result.message || "Ese slot ya esta ocupado por otro subbot.";
+  }
+
+  if (result?.status === "main_not_ready") {
+    return "El bot principal aun no esta listo para generar un codigo.";
+  }
+
+  if (result?.status === "pending") {
+    return "Ya hay una solicitud de codigo en proceso para ese subbot.";
+  }
+
+  if (result?.status === "missing_number") {
+    return "Debes enviar un numero con codigo de pais, por ejemplo 51912345678.";
+  }
+
+  if (result?.status === "already_linked") {
+    return "Ese subbot ya esta vinculado y funcionando.";
+  }
+
+  if (result?.status === "public_requests_disabled") {
+    return "Las solicitudes publicas de subbots estan apagadas por el owner.";
+  }
+
+  return result?.message || "No pude completar la solicitud del subbot.";
+}
+
+function resolveBridgeSubbotHttpStatus(status = "") {
+  if (status === "main_not_ready") return 503;
+  if (status === "public_requests_disabled") return 403;
+  if (["no_capacity", "slot_busy", "pending", "already_linked"].includes(status)) {
+    return 409;
+  }
+
+  return 400;
+}
+
+async function handleBridgeRequest(req, res, requestUrl) {
+  const pathname = requestUrl.pathname;
+
+  if (!pathname.startsWith("/bridge/")) {
+    return false;
+  }
+
+  if (req.method === "OPTIONS") {
+    res.writeHead(204, {
+      "access-control-allow-methods": "GET, POST, OPTIONS",
+      "access-control-allow-headers": "Content-Type, Authorization, X-Bridge-Token",
+      "access-control-max-age": "600",
+    });
+    res.end();
+    return true;
+  }
+
+  if (!isBridgeReady()) {
+    sendDashboardJson(res, 503, {
+      ok: false,
+      error: getBridgeUnavailableMessage(),
+    });
+    return true;
+  }
+
+  if (!isBridgeAuthorized(req)) {
+    sendDashboardJson(res, 401, {
+      ok: false,
+      error: "No autorizado para usar el bridge del bot.",
+    });
+    return true;
+  }
+
+  if (pathname === "/bridge/status" && req.method === "GET") {
+    sendDashboardJson(res, 200, buildBridgeStatusPayload());
+    return true;
+  }
+
+  if (pathname === "/bridge/chat" && req.method === "POST") {
+    const body = await readJsonRequestBody(req);
+    const mensaje = String(body?.mensaje || "").trim();
+    const usuario = String(body?.usuario || "web-user").trim() || "web-user";
+
+    if (!mensaje) {
+      sendDashboardJson(res, 400, {
+        ok: false,
+        error: "El campo mensaje es obligatorio.",
+      });
+      return true;
+    }
+
+    sendDashboardJson(res, 200, {
+      ...buildBridgeStatusPayload(),
+      respuesta: buildBridgeChatReply(mensaje, usuario),
+    });
+    return true;
+  }
+
+  if (pathname === "/bridge/subbot-request" && req.method === "POST") {
+    const body = await readJsonRequestBody(req);
+    const numero = sanitizePhoneNumber(body?.numero || body?.number || body?.requesterNumber);
+    const usuario = String(body?.usuario || "web-user").trim() || "web-user";
+    const slot = Number.parseInt(String(body?.slot || ""), 10);
+    const runtime = global.botRuntime;
+    const state = runtime?.getSubbotRequestState?.() || {};
+
+    if (!numero) {
+      sendDashboardJson(res, 400, {
+        ok: false,
+        error: "Debes enviar un numero con codigo de pais.",
+      });
+      return true;
+    }
+
+    if (!runtime?.requestBotPairingCode) {
+      sendDashboardJson(res, 503, {
+        ok: false,
+        error: "El runtime de subbots no esta disponible en este proceso.",
+      });
+      return true;
+    }
+
+    const requestedBotId =
+      Number.isFinite(slot) && slot >= 1 ? `subbot${slot}` : "subbot";
+    const result = await runtime.requestBotPairingCode(requestedBotId, {
+      number: numero,
+      requesterNumber: numero,
+      requesterJid: `web:${usuario}`,
+      useCache: true,
+    });
+
+    if (!result?.ok) {
+      sendDashboardJson(res, resolveBridgeSubbotHttpStatus(result?.status), {
+        ok: false,
+        error: resolveBridgeSubbotError(result, Number(state?.maxSlots || 15)),
+        status: result?.status || "request_failed",
+        state: runtime?.getSubbotRequestState?.() || state,
+      });
+      return true;
+    }
+
+    sendDashboardJson(res, 200, {
+      ok: true,
+      source: "Fsociety bot runtime",
+      solicitudId: `subbot-${Date.now()}`,
+      respuesta:
+        `Solicitud aceptada. Usa el codigo para vincular ${result.displayName || "tu subbot"} en WhatsApp.`,
+      codigo: result.code,
+      slot: result.slot || (Number.isFinite(slot) ? slot : null),
+      numero: result.number || numero,
+      expiresInMs: Number(result.expiresInMs || 0),
+      displayName: result.displayName || "Subbot",
+      cached: Boolean(result.cached),
+      state: runtime?.getSubbotRequestState?.() || state,
+    });
+    return true;
+  }
+
+  sendDashboardJson(res, 404, {
+    ok: false,
+    error: "Ruta del bridge no encontrada.",
+  });
+  return true;
+}
+
+function ensureDashboardServer() {
+  if (!dashboardState.enabled || dashboardServer) return;
+
+  dashboardServer = http.createServer((req, res) => {
+    (async () => {
+      const requestUrl = resolveRequestUrl(req);
+      const pathname = requestUrl.pathname;
+      const method = String(req?.method || "GET").trim().toUpperCase();
+
+      if (pathname === "/internal/main/pairing") {
+        if (!["GET", "POST"].includes(method)) {
+          writeJson(res, 405, {
+            message: "Metodo no permitido.",
           });
           return;
         }
 
-        const body = await readJsonBody(req);
-        const phoneNumber = sanitizePhoneNumber(body?.phoneNumber);
-        const forceRelink = body?.forceRelink === true;
-        const useCache = body?.useCache !== false;
-        const mainState = getMainBotState() || ensureBotState(buildMainBotConfig(settings));
-
-        if (phoneNumber) {
-          const nextConfig = saveMainBotPairingNumber(phoneNumber);
-          mainState.config = {
-            ...mainState.config,
-            ...nextConfig,
-          };
+        if (!INTERNAL_WEBHOOK_TOKEN) {
+          writeJson(res, 503, {
+            message: "Configura INTERNAL_WEBHOOK_TOKEN o BOT_WEBHOOK_TOKEN antes de exponer este endpoint.",
+          });
+          return;
         }
 
-        if (forceRelink) {
-          if (Boolean(mainState?.sock?.user?.id)) {
-            writeJson(res, 409, {
-              ok: false,
-              ...buildMainPairingSnapshot({
-                status: "already_linked",
-                message: `${mainState.config?.displayName || "El bot principal"} ya esta conectado.`,
-              }),
+        if (!isIpAllowed(req)) {
+          writeJson(res, 403, {
+            message: "IP no autorizada para el webhook interno.",
+          });
+          return;
+        }
+
+        if (
+          !isTokenAuthorized(req, INTERNAL_WEBHOOK_TOKEN, [
+            "x-bot-webhook-token",
+            "x-internal-token",
+          ])
+        ) {
+          writeJson(res, 401, {
+            message: "Token del webhook interno invalido.",
+          });
+          return;
+        }
+
+        try {
+          if (method === "GET") {
+            writeJson(res, 200, {
+              ok: true,
+              ...buildMainPairingSnapshot(),
             });
             return;
           }
 
-          resetMainBotSession(mainState, {
-            number: phoneNumber || mainState?.config?.pairingNumber || settings?.pairingNumber || "",
+          const body = await readJsonBody(req);
+          const phoneNumber = sanitizePhoneNumber(body?.phoneNumber);
+          const forceRelink = body?.forceRelink === true;
+          const useCache = body?.useCache !== false;
+          const mainState =
+            getMainBotState() || ensureBotState(buildMainBotConfig(settings));
+
+          if (phoneNumber) {
+            const nextConfig = saveMainBotPairingNumber(phoneNumber);
+            mainState.config = {
+              ...mainState.config,
+              ...nextConfig,
+            };
+          }
+
+          if (forceRelink) {
+            if (Boolean(mainState?.sock?.user?.id)) {
+              writeJson(res, 409, {
+                ok: false,
+                ...buildMainPairingSnapshot({
+                  status: "already_linked",
+                  message: `${
+                    mainState.config?.displayName || "El bot principal"
+                  } ya esta conectado.`,
+                }),
+              });
+              return;
+            }
+
+            resetMainBotSession(mainState, {
+              number:
+                phoneNumber ||
+                mainState?.config?.pairingNumber ||
+                settings?.pairingNumber ||
+                "",
+            });
+          }
+
+          const result = await global.botRuntime.requestBotPairingCode("main", {
+            number:
+              phoneNumber ||
+              mainState?.config?.pairingNumber ||
+              settings?.pairingNumber ||
+              "",
+            useCache,
           });
+
+          writeJson(res, 200, {
+            ok: Boolean(result?.ok),
+            ...buildMainPairingSnapshot(result),
+          });
+          return;
+        } catch (error) {
+          writeJson(res, error?.statusCode || 500, {
+            ok: false,
+            ...buildMainPairingSnapshot({
+              status: "error",
+              message:
+                error?.message ||
+                "No pude generar el codigo del bot principal.",
+            }),
+          });
+          return;
+        }
+      }
+
+      if (pathname === "/internal/subbot/request") {
+        if (method !== "POST") {
+          writeJson(res, 405, {
+            message: "Metodo no permitido.",
+          });
+          return;
         }
 
-        const result = await global.botRuntime.requestBotPairingCode("main", {
-          number: phoneNumber || mainState?.config?.pairingNumber || settings?.pairingNumber || "",
-          useCache,
-        });
+        if (!INTERNAL_WEBHOOK_TOKEN) {
+          writeJson(res, 503, {
+            message: "Configura INTERNAL_WEBHOOK_TOKEN o BOT_WEBHOOK_TOKEN antes de exponer este endpoint.",
+          });
+          return;
+        }
 
-        writeJson(res, result?.ok ? 200 : 200, {
-          ok: Boolean(result?.ok),
-          ...buildMainPairingSnapshot(result),
-        });
-        return;
-      } catch (error) {
-        writeJson(res, error?.statusCode || 500, {
-          ok: false,
-          ...buildMainPairingSnapshot({
-            status: "error",
-            message: error?.message || "No pude generar el codigo del bot principal.",
-          }),
-        });
+        if (!isIpAllowed(req)) {
+          writeJson(res, 403, {
+            message: "IP no autorizada para el webhook interno.",
+          });
+          return;
+        }
+
+        if (
+          !isTokenAuthorized(req, INTERNAL_WEBHOOK_TOKEN, [
+            "x-bot-webhook-token",
+            "x-internal-token",
+          ])
+        ) {
+          writeJson(res, 401, {
+            message: "Token del webhook interno invalido.",
+          });
+          return;
+        }
+
+        try {
+          const body = await readJsonBody(req);
+          const requestToken = String(body?.requestToken || "").trim();
+          const phoneNumber = sanitizePhoneNumber(body?.phoneNumber);
+
+          if (!requestToken || !phoneNumber) {
+            writeJson(res, 400, {
+              message: "Debes enviar requestToken y phoneNumber.",
+            });
+            return;
+          }
+
+          const callbackConfig = resolvePanelCallbackConfig(body);
+          const hasAsyncCallback =
+            Boolean(callbackConfig.callbackUrl) &&
+            Boolean(callbackConfig.callbackToken);
+
+          if (hasAsyncCallback) {
+            Promise.resolve()
+              .then(() => processInternalSubbotRequest(body))
+              .catch((error) => {
+                console.error(
+                  "[internal-webhook] Error procesando solicitud:",
+                  error?.message || error
+                );
+              });
+
+            writeJson(res, 202, {
+              accepted: true,
+              requestToken,
+              pairingStatus: "processing",
+              pairingMessage:
+                "Solicitud aceptada por el bot principal. El codigo se enviara al panel cuando este listo.",
+            });
+            return;
+          }
+
+          const outcome = await processInternalSubbotRequest(body);
+          writeJson(res, 200, {
+            accepted: true,
+            requestToken,
+            ...outcome.panelPayload,
+          });
+          return;
+        } catch (error) {
+          writeJson(res, error?.statusCode || 500, {
+            message:
+              error?.message || "No pude procesar la solicitud del subbot.",
+          });
+          return;
+        }
+      }
+
+      if (await handleBridgeRequest(req, res, requestUrl)) {
         return;
       }
-    }
 
-    if (pathname === "/internal/subbot/request") {
-      if (method !== "POST") {
-        writeJson(res, 405, {
-          message: "Metodo no permitido.",
-        });
-        return;
-      }
+      if (pathname.startsWith("/json")) {
+        if (
+          !isTokenAuthorized(req, DASHBOARD_TOKEN, [
+            "x-dashboard-token",
+            "x-api-key",
+          ])
+        ) {
+          writeJson(res, 401, {
+            message: "Token de dashboard invalido.",
+          });
+          return;
+        }
 
-      if (!INTERNAL_WEBHOOK_TOKEN) {
-        writeJson(res, 503, {
-          message: "Configura INTERNAL_WEBHOOK_TOKEN o BOT_WEBHOOK_TOKEN antes de exponer este endpoint.",
-        });
-        return;
-      }
-
-      if (!isIpAllowed(req)) {
-        writeJson(res, 403, {
-          message: "IP no autorizada para el webhook interno.",
-        });
+        sendDashboardJson(res, 200, getDashboardSnapshot());
         return;
       }
 
       if (
-        !isTokenAuthorized(req, INTERNAL_WEBHOOK_TOKEN, [
-          "x-bot-webhook-token",
-          "x-internal-token",
+        !isTokenAuthorized(req, DASHBOARD_TOKEN, [
+          "x-dashboard-token",
+          "x-api-key",
         ])
       ) {
-        writeJson(res, 401, {
-          message: "Token del webhook interno invalido.",
-        });
-        return;
-      }
-
-      try {
-        const body = await readJsonBody(req);
-        const requestToken = String(body?.requestToken || "").trim();
-        const phoneNumber = sanitizePhoneNumber(body?.phoneNumber);
-
-        if (!requestToken || !phoneNumber) {
-          writeJson(res, 400, {
-            message: "Debes enviar requestToken y phoneNumber.",
-          });
-          return;
-        }
-
-        const callbackConfig = resolvePanelCallbackConfig(body);
-        const hasAsyncCallback =
-          Boolean(callbackConfig.callbackUrl) && Boolean(callbackConfig.callbackToken);
-
-        if (hasAsyncCallback) {
-          Promise.resolve()
-            .then(() => processInternalSubbotRequest(body))
-            .catch((error) => {
-              console.error("[internal-webhook] Error procesando solicitud:", error?.message || error);
-            });
-
-          writeJson(res, 202, {
-            accepted: true,
-            requestToken,
-            pairingStatus: "processing",
-            pairingMessage:
-              "Solicitud aceptada por el bot principal. El codigo se enviara al panel cuando este listo.",
-          });
-          return;
-        }
-
-        const outcome = await processInternalSubbotRequest(body);
-        writeJson(res, 200, {
-          accepted: true,
-          requestToken,
-          ...outcome.panelPayload,
-        });
-        return;
-      } catch (error) {
-        writeJson(res, error?.statusCode || 500, {
-          message: error?.message || "No pude procesar la solicitud del subbot.",
-        });
-        return;
-      }
-    }
-
-    if (pathname.startsWith("/json")) {
-      if (!isTokenAuthorized(req, DASHBOARD_TOKEN, ["x-dashboard-token", "x-api-key"])) {
         writeJson(res, 401, {
           message: "Token de dashboard invalido.",
         });
         return;
       }
 
-      const payload = JSON.stringify(getDashboardSnapshot(), null, 2);
-      res.writeHead(200, {
-        "content-type": "application/json; charset=utf-8",
-      });
-      res.end(payload);
-      return;
-    }
-
-    if (!isTokenAuthorized(req, DASHBOARD_TOKEN, ["x-dashboard-token", "x-api-key"])) {
-      writeJson(res, 401, {
-        message: "Token de dashboard invalido.",
-      });
-      return;
-    }
-
-    const snapshot = getDashboardSnapshot();
-    const html = `
+      const snapshot = getDashboardSnapshot();
+      const html = `
 <!doctype html>
 <html lang="es">
 <head>
@@ -2959,10 +3417,37 @@ function ensureDashboardServer() {
   <div class="card" style="margin-top:16px"><pre>${JSON.stringify(snapshot, null, 2)}</pre></div>
 </body>
 </html>`;
-    res.writeHead(200, {
-      "content-type": "text/html; charset=utf-8",
+      res.writeHead(200, {
+        "content-type": "text/html; charset=utf-8",
+      });
+      res.end(html);
+    })().catch((error) => {
+      if (res.headersSent) {
+        return;
+      }
+
+      if (error?.message === "invalid_json") {
+        sendDashboardJson(res, 400, {
+          ok: false,
+          error: "JSON invalido en la solicitud del bridge.",
+        });
+        return;
+      }
+
+      if (error?.message === "payload_too_large") {
+        sendDashboardJson(res, 413, {
+          ok: false,
+          error: "La solicitud al bridge es demasiado grande.",
+        });
+        return;
+      }
+
+      console.error("Error en dashboard/bridge:", error);
+      sendDashboardJson(res, 500, {
+        ok: false,
+        error: "Error interno en el dashboard del bot.",
+      });
     });
-    res.end(html);
   });
 
   dashboardServer.listen(dashboardState.port, dashboardState.host, () => {
@@ -3836,6 +4321,21 @@ function setSubbotMaxSlots(nextValue) {
 global.botRuntime = {
   requestBotPairingCode: async (botId, options = {}) => {
     const requestedBotId = String(botId || "").trim().toLowerCase();
+    const bypassPublicRequests = options?.bypassPublicRequests === true;
+    const isSubbotRequest = requestedBotId !== "main";
+
+    if (
+      isSubbotRequest &&
+      settings?.subbot?.publicRequests === false &&
+      !bypassPublicRequests
+    ) {
+      return {
+        ok: false,
+        status: "public_requests_disabled",
+        message: "Las solicitudes publicas de subbots estan apagadas por el owner.",
+      };
+    }
+
     let targetConfig =
       requestedBotId === "main"
         ? getBotConfigById("main")
@@ -3958,7 +4458,7 @@ global.botRuntime = {
   getAutoCleanState: () => getAutoCleanState(),
   setAutoCleanConfig: (patch = {}) => setAutoCleanConfig(patch),
   runAutoClean: () => runAutoClean(),
-  getDashboardSnapshot: () => getDashboardSnapshot(),
+  getDashboardSnapshot: (options = {}) => getDashboardSnapshot(options),
   setDashboardConfig: (patch = {}) => setDashboardConfig(patch),
   listBots: (options = {}) => {
     const includeMain = options?.includeMain === true;

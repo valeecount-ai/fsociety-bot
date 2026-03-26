@@ -37,14 +37,20 @@ export default {
           `- ${prefix}adivina\n` +
           `- ${prefix}ahorcado\n` +
           `- ${prefix}mezclapalabra\n` +
-          `- ${prefix}mate\n` +
-          `- ${prefix}trivia\n` +
-          `- ${prefix}emojiquiz\n` +
-          `- ${prefix}tictactoe\n\n` +
+        `- ${prefix}mate\n` +
+        `- ${prefix}trivia\n` +
+        `- ${prefix}verdaderoofalso\n` +
+        `- ${prefix}quizanime\n` +
+        `- ${prefix}emojiquiz\n` +
+        `- ${prefix}banderas\n` +
+        `- ${prefix}tictactoe\n` +
+        `- ${prefix}ruleta rojo\n\n` +
           `Rankings:\n` +
           `- ${prefix}topjuegos\n` +
           `- ${prefix}topjuegos grupo\n` +
           `- ${prefix}topjuegos trivia\n` +
+          `- ${prefix}topjuegos quizanime\n` +
+          `- ${prefix}topjuegos verdaderoofalso\n` +
           `- ${prefix}topjuegos grupo trivia\n` +
           `- ${prefix}perfilgame\n\n` +
           `Control:\n` +

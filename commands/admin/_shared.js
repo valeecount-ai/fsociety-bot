@@ -1,12 +1,14 @@
-import fs from "fs";
 import path from "path";
+import {
+  ensureDir as ensureDirectory,
+  readJson as readJsonFile,
+  writeJsonAtomic,
+} from "../../lib/json-store.js";
 
 const DB_DIR = path.join(process.cwd(), "database");
 
 export function ensureDir(dirPath) {
-  if (!fs.existsSync(dirPath)) {
-    fs.mkdirSync(dirPath, { recursive: true });
-  }
+  ensureDirectory(dirPath);
 }
 
 export function ensureDatabaseDir() {
@@ -24,17 +26,12 @@ export function safeParseJson(raw, fallback) {
 }
 
 export function readJson(filePath, fallback) {
-  try {
-    if (!fs.existsSync(filePath)) return fallback;
-    return safeParseJson(fs.readFileSync(filePath, "utf-8"), fallback);
-  } catch {
-    return fallback;
-  }
+  return readJsonFile(filePath, fallback);
 }
 
 export function writeJson(filePath, value) {
   ensureDir(path.dirname(filePath));
-  fs.writeFileSync(filePath, JSON.stringify(value, null, 2));
+  writeJsonAtomic(filePath, value);
 }
 
 export function getQuoted(msg) {

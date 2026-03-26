@@ -1,5 +1,5 @@
-import fs from "fs";
 import path from "path";
+import { writeJsonAtomic } from "../../lib/json-store.js";
 
 const SETTINGS_FILE = path.join(process.cwd(), "settings", "settings.json");
 
@@ -16,7 +16,7 @@ function getSubbotSlot(botId = "") {
 }
 
 function saveSettings(settings) {
-  fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2));
+  writeJsonAtomic(SETTINGS_FILE, settings);
 }
 
 export default {

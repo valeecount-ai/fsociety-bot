@@ -32,6 +32,7 @@ import {
   setAutoCleanConfig,
 } from "./lib/autoclean.js";
 import { applyStoredRuntimeVars } from "./lib/runtime-vars.js";
+import { writeJsonAtomic as writeAtomicJsonFile } from "./lib/json-store.js";
 import { touchEconomyProfile } from "./commands/economia/_shared.js";
 
 dotenv.config();
@@ -471,7 +472,7 @@ function ensureSystemSettings(currentSettings) {
 }
 
 function saveSettingsFile() {
-  fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2));
+  writeAtomicJsonFile(SETTINGS_FILE, settings);
 }
 
 function refreshChannelInfo() {
@@ -1347,20 +1348,13 @@ function writePersistedBotRuntimeState(botState) {
 
   try {
     const summary = summarizeBotState(botState);
-    fs.writeFileSync(
-      getBotRuntimeStateFile(botState.config.id),
-      JSON.stringify(
-        {
-          ...summary,
-          processBotId: PROCESS_BOT_ID,
-          processPid: process.pid,
-          splitProcessMode: SPLIT_PROCESS_MODE,
-          updatedAt: Date.now(),
-        },
-        null,
-        2
-      )
-    );
+    writeAtomicJsonFile(getBotRuntimeStateFile(botState.config.id), {
+      ...summary,
+      processBotId: PROCESS_BOT_ID,
+      processPid: process.pid,
+      splitProcessMode: SPLIT_PROCESS_MODE,
+      updatedAt: Date.now(),
+    });
   } catch {}
 }
 
@@ -1453,7 +1447,7 @@ function scheduleUsageStatsSave() {
     usageStatsSaveTimer = null;
 
     try {
-      fs.writeFileSync(USAGE_STATS_FILE, JSON.stringify(usageStats, null, 2));
+      writeAtomicJsonFile(USAGE_STATS_FILE, usageStats);
     } catch {}
   }, 2000);
 
@@ -1703,8 +1697,17 @@ function isTaskTimeoutError(error) {
   return String(error?.code || "").trim().toUpperCase() === "TASK_TIMEOUT";
 }
 
-function runTaskWithTimeout(label, timeoutMs, task) {
+function createTaskAbortController() {
+  try {
+    return typeof AbortController === "function" ? new AbortController() : null;
+  } catch {
+    return null;
+  }
+}
+
+function runTaskWithTimeout(label, timeoutMs, task, options = {}) {
   const effectiveTimeout = Number(timeoutMs || 0);
+  const abortController = options?.abortController || null;
 
   if (!Number.isFinite(effectiveTimeout) || effectiveTimeout <= 0) {
     return Promise.resolve().then(task);
@@ -1714,7 +1717,19 @@ function runTaskWithTimeout(label, timeoutMs, task) {
     let settled = false;
     const timer = setTimeout(() => {
       settled = true;
-      reject(buildTaskTimeoutError(label, effectiveTimeout));
+      const timeoutError = buildTaskTimeoutError(label, effectiveTimeout);
+
+      if (abortController && typeof abortController.abort === "function") {
+        try {
+          abortController.abort(timeoutError);
+        } catch {
+          try {
+            abortController.abort();
+          } catch {}
+        }
+      }
+
+      reject(timeoutError);
     }, effectiveTimeout);
 
     timer.unref?.();
@@ -2159,6 +2174,7 @@ function releaseSubbotSlot(botState, options = {}) {
   clearReconnectTimer(botState);
   clearPairingResetTimer(botState);
   clearProfileApplyTimer(botState);
+  abortActiveDownloadJobs(botState, "subbot_slot_released");
 
   if (options?.closeSocket !== false) {
     try {
@@ -2252,6 +2268,7 @@ function resetMainBotSession(botState, options = {}) {
   clearReconnectTimer(botState);
   clearPairingResetTimer(botState);
   clearProfileApplyTimer(botState);
+  abortActiveDownloadJobs(botState, "main_session_reset");
 
   try {
     botState.sock?.end?.();
@@ -2559,6 +2576,31 @@ function ensureBotDownloadQueue(botState) {
   }
 }
 
+function abortActiveDownloadJobs(botState, reason = "cancelled") {
+  if (!botState?.activeDownloadJobs?.size) {
+    return 0;
+  }
+
+  const abortError = new Error(String(reason || "cancelled"));
+  let abortedCount = 0;
+
+  for (const job of botState.activeDownloadJobs.values()) {
+    const abortController = job?.abortController;
+    if (!abortController || typeof abortController.abort !== "function") {
+      continue;
+    }
+
+    try {
+      if (!abortController.signal?.aborted) {
+        abortController.abort(abortError);
+      }
+      abortedCount += 1;
+    } catch {}
+  }
+
+  return abortedCount;
+}
+
 function getBotDownloadQueueState(botState) {
   ensureBotDownloadQueue(botState);
 
@@ -2593,6 +2635,11 @@ function enqueueDownloadCommand(botState, cmd, commandContext) {
   const jobId = Number(botState.downloadQueueCounter || 0) + 1;
   botState.downloadQueueCounter = jobId;
   const timeoutMs = resolveCommandTimeout(cmd);
+  const abortController = createTaskAbortController();
+  const commandExecutionContext = {
+    ...commandContext,
+    abortSignal: abortController?.signal || null,
+  };
 
   let resolveJob;
   let rejectJob;
@@ -2606,6 +2653,7 @@ function enqueueDownloadCommand(botState, cmd, commandContext) {
     commandName: commandContext?.commandName || cmd?.name || "descarga",
     startedAt: Date.now(),
     timeoutMs,
+    abortController,
   };
   botState.activeDownloadJobs.set(jobId, activeJob);
 
@@ -2614,7 +2662,8 @@ function enqueueDownloadCommand(botState, cmd, commandContext) {
       runTaskWithTimeout(
         `${getBotTag(botState)} comando ${activeJob.commandName}`,
         timeoutMs,
-        () => cmd.run(commandContext)
+        () => cmd.run(commandExecutionContext),
+        { abortController }
       )
     )
     .then((result) => {
@@ -4346,6 +4395,7 @@ function stopLocalManagedBot(botState, reason = "disabled") {
   clearReconnectTimer(botState);
   clearPairingResetTimer(botState);
   clearProfileApplyTimer(botState);
+  abortActiveDownloadJobs(botState, `bot_stopped:${reason}`);
 
   try {
     botState.sock?.end?.();
@@ -4372,6 +4422,7 @@ function recycleBotInstance(botState, reason = "recovery") {
   clearReconnectTimer(botState);
   clearPairingResetTimer(botState);
   clearProfileApplyTimer(botState);
+  abortActiveDownloadJobs(botState, `bot_recycled:${reason}`);
 
   try {
     botState.sock?.end?.();
@@ -5178,11 +5229,14 @@ async function handleIncomingMessages(botState, sock, messages) {
       }
 
       const timeoutMs = resolveCommandTimeout(cmd);
+      const abortController = createTaskAbortController();
+      commandContext.abortSignal = abortController?.signal || null;
       startCommandTracking(botState, commandData.commandName, timeoutMs);
       await runTaskWithTimeout(
         `${getBotTag(botState)} comando ${commandData.commandName}`,
         timeoutMs,
-        () => cmd.run(commandContext)
+        () => cmd.run(commandContext),
+        { abortController }
       );
       finishCommandTracking(botState, commandData.commandName, "ok");
       recordCommandSuccess(commandData.commandName);
@@ -5569,7 +5623,7 @@ process.on("SIGINT", () => {
       clearInterval(botHealthCheckInterval);
       botHealthCheckInterval = null;
     }
-    fs.writeFileSync(USAGE_STATS_FILE, JSON.stringify(usageStats, null, 2));
+    writeAtomicJsonFile(USAGE_STATS_FILE, usageStats);
   } catch {}
 
   try {
@@ -5577,6 +5631,10 @@ process.on("SIGINT", () => {
   } catch {}
 
   for (const botState of botStates.values()) {
+    try {
+      abortActiveDownloadJobs(botState, "process_sigint");
+    } catch {}
+
     try {
       if (botState.reconnectTimer) {
         clearTimeout(botState.reconnectTimer);

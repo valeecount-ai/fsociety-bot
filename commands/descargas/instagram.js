@@ -4,6 +4,7 @@ import os from "os";
 import axios from "axios";
 import { pipeline } from "stream/promises";
 import { spawn } from "child_process";
+import { bindAbort, buildAbortError, throwIfAborted } from "../../lib/command-abort.js";
 import { chargeDownloadRequest, refundDownloadCharge } from "../economia/download-access.js";
 
 const API_BASE = "https://dv-yer-api.online";
@@ -130,12 +131,24 @@ async function readStreamToText(stream) {
   });
 }
 
-async function apiGet(url, params, timeout = REQUEST_TIMEOUT) {
-  const response = await axios.get(url, {
-    timeout,
-    params,
-    validateStatus: () => true,
-  });
+async function apiGet(url, params, timeout = REQUEST_TIMEOUT, options = {}) {
+  const signal = options?.signal || null;
+  throwIfAborted(signal);
+
+  let response;
+  try {
+    response = await axios.get(url, {
+      timeout,
+      params,
+      signal,
+      validateStatus: () => true,
+    });
+  } catch (error) {
+    if (signal?.aborted) {
+      throw buildAbortError(signal);
+    }
+    throw error;
+  }
 
   const data = response.data;
 
@@ -150,7 +163,7 @@ async function apiGet(url, params, timeout = REQUEST_TIMEOUT) {
   return data;
 }
 
-async function requestInstagramInfo(postUrl, pick) {
+async function requestInstagramInfo(postUrl, pick, options = {}) {
   const data = await apiGet(
     API_INSTAGRAM_URL,
     {
@@ -159,7 +172,8 @@ async function requestInstagramInfo(postUrl, pick) {
       pick,
       lang: "es",
     },
-    REQUEST_TIMEOUT
+    REQUEST_TIMEOUT,
+    options
   );
 
   const selected = data?.selected || {};
@@ -180,25 +194,37 @@ async function requestInstagramInfo(postUrl, pick) {
   };
 }
 
-async function downloadInstagramFile(postUrl, pick, outputPath) {
-  const response = await axios.get(API_INSTAGRAM_URL, {
-    responseType: "stream",
-    timeout: REQUEST_TIMEOUT,
-    params: {
-      mode: "file",
-      url: postUrl,
-      pick,
-      lang: "es",
-    },
-    headers: {
-      "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122 Safari/537.36",
-      Accept: "*/*",
-      Referer: `${API_BASE}/`,
-    },
-    validateStatus: () => true,
-    maxRedirects: 5,
-  });
+async function downloadInstagramFile(postUrl, pick, outputPath, options = {}) {
+  const signal = options?.signal || null;
+  throwIfAborted(signal);
+
+  let response;
+  try {
+    response = await axios.get(API_INSTAGRAM_URL, {
+      responseType: "stream",
+      timeout: REQUEST_TIMEOUT,
+      signal,
+      params: {
+        mode: "file",
+        url: postUrl,
+        pick,
+        lang: "es",
+      },
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122 Safari/537.36",
+        Accept: "*/*",
+        Referer: `${API_BASE}/`,
+      },
+      validateStatus: () => true,
+      maxRedirects: 5,
+    });
+  } catch (error) {
+    if (signal?.aborted) {
+      throw buildAbortError(signal);
+    }
+    throw error;
+  }
 
   if (response.status >= 400) {
     const errorText = await readStreamToText(response.data).catch(() => "");
@@ -224,12 +250,27 @@ async function downloadInstagramFile(postUrl, pick, outputPath) {
     }
   });
 
+  const outputStream = fs.createWriteStream(outputPath);
+  const releaseAbort = bindAbort(signal, () => {
+    const abortError = buildAbortError(signal);
+    response.data?.destroy?.(abortError);
+    outputStream.destroy(abortError);
+    deleteFileSafe(outputPath);
+  });
+
   try {
-    await pipeline(response.data, fs.createWriteStream(outputPath));
+    await pipeline(response.data, outputStream);
   } catch (error) {
     deleteFileSafe(outputPath);
+    if (signal?.aborted) {
+      throw buildAbortError(signal);
+    }
     throw error;
+  } finally {
+    releaseAbort();
   }
+
+  throwIfAborted(signal);
 
   if (!fs.existsSync(outputPath)) {
     throw new Error("No se pudo guardar el archivo.");
@@ -253,7 +294,10 @@ async function downloadInstagramFile(postUrl, pick, outputPath) {
   };
 }
 
-async function convertVideoForWhatsApp(inputPath, outputPath) {
+async function convertVideoForWhatsApp(inputPath, outputPath, options = {}) {
+  const signal = options?.signal || null;
+  throwIfAborted(signal);
+
   return await new Promise((resolve, reject) => {
     const ffmpeg = spawn(
       "ffmpeg",
@@ -295,6 +339,27 @@ async function convertVideoForWhatsApp(inputPath, outputPath) {
     );
 
     let errorText = "";
+    let settled = false;
+    const releaseAbort = bindAbort(signal, () => {
+      deleteFileSafe(outputPath);
+      try {
+        ffmpeg.kill("SIGKILL");
+      } catch {}
+    });
+
+    const finishReject = (error) => {
+      if (settled) return;
+      settled = true;
+      releaseAbort();
+      reject(signal?.aborted ? buildAbortError(signal) : error);
+    };
+
+    const finishResolve = (value) => {
+      if (settled) return;
+      settled = true;
+      releaseAbort();
+      resolve(value);
+    };
 
     ffmpeg.stderr.on("data", (chunk) => {
       errorText += chunk.toString();
@@ -302,18 +367,23 @@ async function convertVideoForWhatsApp(inputPath, outputPath) {
 
     ffmpeg.on("error", (error) => {
       if (error?.code === "ENOENT") {
-        reject(new Error("ffmpeg no está instalado en el hosting."));
+        finishReject(new Error("ffmpeg no está instalado en el hosting."));
         return;
       }
-      reject(error);
+      finishReject(error);
     });
 
     ffmpeg.on("close", (code) => {
-      if (code === 0) {
-        resolve(true);
+      if (signal?.aborted) {
+        finishReject(buildAbortError(signal));
         return;
       }
-      reject(new Error(errorText.trim() || "No se pudo convertir el video para WhatsApp."));
+
+      if (code === 0) {
+        finishResolve(true);
+        return;
+      }
+      finishReject(new Error(errorText.trim() || "No se pudo convertir el video para WhatsApp."));
     });
   });
 }
@@ -389,6 +459,7 @@ export default {
   run: async (ctx) => {
     const { sock, from } = ctx;
     const msg = ctx.m || ctx.msg || null;
+    const abortSignal = ctx.abortSignal || null;
     const quoted = msg?.key ? { quoted: msg } : undefined;
     const userId = `${from}:instagram`;
 
@@ -438,7 +509,10 @@ export default {
         quoted
       );
 
-      const info = await requestInstagramInfo(postUrl, pick);
+      const info = await requestInstagramInfo(postUrl, pick, {
+        signal: abortSignal,
+      });
+      throwIfAborted(abortSignal);
 
       if (info.thumbnail) {
         const previewLines = ["api dvyer", "", `📸 ${info.title}`];
@@ -458,14 +532,18 @@ export default {
       }
 
       rawPath = path.join(TMP_DIR, `${Date.now()}-raw-${info.fileName}`);
-      const downloaded = await downloadInstagramFile(postUrl, pick, rawPath);
+      const downloaded = await downloadInstagramFile(postUrl, pick, rawPath, {
+        signal: abortSignal,
+      });
 
       let sendPath = downloaded.tempPath;
       let sendSize = downloaded.size;
 
       if (info.mediaType === "video") {
         finalPath = path.join(TMP_DIR, `${Date.now()}-final-${normalizeMediaFileName(info.fileName, "video")}`);
-        await convertVideoForWhatsApp(downloaded.tempPath, finalPath);
+        await convertVideoForWhatsApp(downloaded.tempPath, finalPath, {
+          signal: abortSignal,
+        });
 
         if (!fs.existsSync(finalPath)) {
           throw new Error("No se pudo preparar el video final.");
@@ -479,6 +557,7 @@ export default {
         }
       }
 
+      throwIfAborted(abortSignal);
       await sendInstagramMedia(sock, from, quoted, {
         filePath: sendPath,
         fileName: normalizeMediaFileName(info.fileName, info.mediaType),
@@ -488,11 +567,17 @@ export default {
         size: sendSize,
       });
     } catch (err) {
+      const aborted = abortSignal?.aborted === true;
       console.error("INSTAGRAM ERROR:", err?.message || err);
       refundDownloadCharge(ctx, downloadCharge, {
         feature: "instagram",
         error: String(err?.message || err || "unknown_error"),
       });
+      cooldowns.delete(userId);
+
+      if (aborted) {
+        return;
+      }
 
       await sock.sendMessage(from, {
         text: `❌ ${String(err?.message || "No se pudo procesar la publicación de Instagram.")}`,

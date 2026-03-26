@@ -1,5 +1,5 @@
-import fs from "fs";
 import path from "path";
+import { writeJsonAtomic } from "../../lib/json-store.js";
 import {
   addCoins,
   addDownloadRequests,
@@ -24,7 +24,7 @@ function normalizeTarget(value = "") {
 }
 
 function saveSettings(settings) {
-  fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2));
+  writeJsonAtomic(SETTINGS_FILE, settings);
 }
 
 function getStatusText(settings) {

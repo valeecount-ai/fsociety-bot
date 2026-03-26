@@ -1,5 +1,6 @@
 import fs from "fs";
 import path from "path";
+import { writeJsonAtomic } from "../../lib/json-store.js";
 import { recordWeeklyCoins, recordWeeklyGame } from "../../lib/weekly.js";
 
 const DB_DIR = path.join(process.cwd(), "database");
@@ -61,7 +62,7 @@ function scheduleSave() {
   if (saveTimer) return;
   saveTimer = setTimeout(() => {
     saveTimer = null;
-    fs.writeFileSync(FILE, JSON.stringify(state, null, 2));
+    writeJsonAtomic(FILE, state);
   }, 800);
   saveTimer.unref?.();
 }

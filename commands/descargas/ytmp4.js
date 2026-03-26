@@ -4,6 +4,7 @@ import axios from "axios";
 import { pipeline } from "stream/promises";
 import { spawn } from "child_process";
 import { buildDvyerUrl, getDvyerBaseUrl } from "../../lib/api-manager.js";
+import { bindAbort, buildAbortError, throwIfAborted } from "../../lib/command-abort.js";
 import { getDownloadCache, setDownloadCache, withInflightDedup } from "../../lib/download-cache.js";
 import { chargeDownloadRequest, refundDownloadCharge } from "../economia/download-access.js";
 
@@ -28,6 +29,14 @@ const cooldowns = new Map();
 
 if (!fs.existsSync(TMP_DIR)) {
   fs.mkdirSync(TMP_DIR, { recursive: true });
+}
+
+function deleteFileSafe(filePath) {
+  try {
+    if (filePath && fs.existsSync(filePath)) {
+      fs.unlinkSync(filePath);
+    }
+  } catch {}
 }
 
 function safeFileName(name) {
@@ -271,19 +280,36 @@ async function resolveFastestVideoLinkCached(videoUrl) {
   });
 }
 
-async function downloadVideoFromInternalLink(downloadUrl, outputPath, suggestedFileName = "video.mp4") {
-  const response = await axios.get(downloadUrl, {
-    responseType: "stream",
-    timeout: REQUEST_TIMEOUT,
-    headers: {
-      "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122 Safari/537.36",
-      Accept: "*/*",
-      Referer: `${API_BASE}/`,
-    },
-    validateStatus: () => true,
-    maxRedirects: 5,
-  });
+async function downloadVideoFromInternalLink(
+  downloadUrl,
+  outputPath,
+  suggestedFileName = "video.mp4",
+  options = {}
+) {
+  const signal = options?.signal || null;
+  throwIfAborted(signal);
+
+  let response;
+  try {
+    response = await axios.get(downloadUrl, {
+      responseType: "stream",
+      timeout: REQUEST_TIMEOUT,
+      signal,
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122 Safari/537.36",
+        Accept: "*/*",
+        Referer: `${API_BASE}/`,
+      },
+      validateStatus: () => true,
+      maxRedirects: 5,
+    });
+  } catch (error) {
+    if (signal?.aborted) {
+      throw buildAbortError(signal);
+    }
+    throw error;
+  }
 
   if (response.status >= 400) {
     const errorText = await readStreamToText(response.data).catch(() => "");
@@ -315,7 +341,27 @@ async function downloadVideoFromInternalLink(downloadUrl, outputPath, suggestedF
     }
   });
 
-  await pipeline(response.data, fs.createWriteStream(outputPath));
+  const outputStream = fs.createWriteStream(outputPath);
+  const releaseAbort = bindAbort(signal, () => {
+    const abortError = buildAbortError(signal);
+    response.data?.destroy?.(abortError);
+    outputStream.destroy(abortError);
+    deleteFileSafe(outputPath);
+  });
+
+  try {
+    await pipeline(response.data, outputStream);
+  } catch (error) {
+    deleteFileSafe(outputPath);
+    if (signal?.aborted) {
+      throw buildAbortError(signal);
+    }
+    throw error;
+  } finally {
+    releaseAbort();
+  }
+
+  throwIfAborted(signal);
 
   if (!fs.existsSync(outputPath)) {
     throw new Error("No se pudo descargar el video.");
@@ -340,17 +386,29 @@ async function downloadVideoFromInternalLink(downloadUrl, outputPath, suggestedF
   };
 }
 
-async function downloadVideoFromApi(videoUrl, outputPath) {
-  const response = await axios.get(API_VIDEO_URL, {
-    responseType: "stream",
-    timeout: REQUEST_TIMEOUT,
-    params: {
-      mode: "file",
-      quality: VIDEO_QUALITY,
-      url: videoUrl,
-    },
-    validateStatus: () => true,
-  });
+async function downloadVideoFromApi(videoUrl, outputPath, options = {}) {
+  const signal = options?.signal || null;
+  throwIfAborted(signal);
+
+  let response;
+  try {
+    response = await axios.get(API_VIDEO_URL, {
+      responseType: "stream",
+      timeout: REQUEST_TIMEOUT,
+      signal,
+      params: {
+        mode: "file",
+        quality: VIDEO_QUALITY,
+        url: videoUrl,
+      },
+      validateStatus: () => true,
+    });
+  } catch (error) {
+    if (signal?.aborted) {
+      throw buildAbortError(signal);
+    }
+    throw error;
+  }
 
   if (response.status >= 400) {
     const errorText = await readStreamToText(response.data).catch(() => "");
@@ -382,7 +440,27 @@ async function downloadVideoFromApi(videoUrl, outputPath) {
     }
   });
 
-  await pipeline(response.data, fs.createWriteStream(outputPath));
+  const outputStream = fs.createWriteStream(outputPath);
+  const releaseAbort = bindAbort(signal, () => {
+    const abortError = buildAbortError(signal);
+    response.data?.destroy?.(abortError);
+    outputStream.destroy(abortError);
+    deleteFileSafe(outputPath);
+  });
+
+  try {
+    await pipeline(response.data, outputStream);
+  } catch (error) {
+    deleteFileSafe(outputPath);
+    if (signal?.aborted) {
+      throw buildAbortError(signal);
+    }
+    throw error;
+  } finally {
+    releaseAbort();
+  }
+
+  throwIfAborted(signal);
 
   if (!fs.existsSync(outputPath)) {
     throw new Error("No se pudo descargar el video.");
@@ -407,7 +485,10 @@ async function downloadVideoFromApi(videoUrl, outputPath) {
   };
 }
 
-async function normalizeVideoForWhatsApp(inputPath, outputPath) {
+async function normalizeVideoForWhatsApp(inputPath, outputPath, options = {}) {
+  const signal = options?.signal || null;
+  throwIfAborted(signal);
+
   return await new Promise((resolve, reject) => {
     const ffmpeg = spawn(
       "ffmpeg",
@@ -428,20 +509,47 @@ async function normalizeVideoForWhatsApp(inputPath, outputPath) {
       }
     );
 
+    let settled = false;
+    const releaseAbort = bindAbort(signal, () => {
+      deleteFileSafe(outputPath);
+      try {
+        ffmpeg.kill("SIGKILL");
+      } catch {}
+    });
+
+    const finishReject = (error) => {
+      if (settled) return;
+      settled = true;
+      releaseAbort();
+      reject(signal?.aborted ? buildAbortError(signal) : error);
+    };
+
+    const finishResolve = (value) => {
+      if (settled) return;
+      settled = true;
+      releaseAbort();
+      resolve(value);
+    };
+
     ffmpeg.on("error", (error) => {
       if (error?.code === "ENOENT") {
-        resolve(false);
+        finishResolve(false);
         return;
       }
-      reject(error);
+      finishReject(error);
     });
 
     ffmpeg.on("close", (code) => {
-      if (code === 0) {
-        resolve(true);
+      if (signal?.aborted) {
+        finishReject(buildAbortError(signal));
         return;
       }
-      resolve(false);
+
+      if (code === 0) {
+        finishResolve(true);
+        return;
+      }
+      finishResolve(false);
     });
   });
 }
@@ -500,6 +608,7 @@ export default {
   run: async (ctx) => {
     const { sock, from } = ctx;
     const msg = ctx.m || ctx.msg || null;
+    const abortSignal = ctx.abortSignal || null;
     const quoted = msg?.key ? { quoted: msg } : undefined;
     const userId = `${from}:video`;
 
@@ -577,6 +686,7 @@ export default {
       finalVideoFile = path.join(TMP_DIR, `${stamp}-final.mp4`);
 
       let downloaded = null;
+      throwIfAborted(abortSignal);
 
       try {
         const fastestLink = await resolveFastestVideoLinkCached(videoUrl);
@@ -589,18 +699,22 @@ export default {
         downloaded = await downloadVideoFromInternalLink(
           fastestLink.downloadUrl,
           rawVideoFile,
-          fastestLink.fileName || `${title}.mp4`
+          fastestLink.fileName || `${title}.mp4`,
+          { signal: abortSignal }
         );
       } catch (linkError) {
         console.log(
           `YTMP4 link fallback: ${linkError?.message || linkError}`
         );
-        downloaded = await downloadVideoFromApi(videoUrl, rawVideoFile);
+        downloaded = await downloadVideoFromApi(videoUrl, rawVideoFile, {
+          signal: abortSignal,
+        });
       }
 
       const normalized = await normalizeVideoForWhatsApp(
         downloaded.path,
-        finalVideoFile
+        finalVideoFile,
+        { signal: abortSignal }
       );
 
       const sendPath =
@@ -616,6 +730,7 @@ export default {
         stripExtension(downloaded.fileName || `${title}.mp4`) || title
       );
 
+      throwIfAborted(abortSignal);
       await sendVideoOrDocument(sock, from, quoted, {
         filePath: sendPath,
         fileName: normalizeMp4Name(downloaded.fileName || `${finalTitle}.mp4`),
@@ -623,6 +738,7 @@ export default {
         size: sendSize,
       });
     } catch (err) {
+      const aborted = abortSignal?.aborted === true;
       console.error("YTMP4 ERROR:", err?.message || err);
       refundDownloadCharge(ctx, downloadCharge, {
         feature: "ytmp4",
@@ -630,23 +746,17 @@ export default {
       });
       cooldowns.delete(userId);
 
+      if (aborted) {
+        return;
+      }
+
       await sock.sendMessage(from, {
         text: `❌ ${String(err?.message || "Error al procesar el video.")}`,
         ...global.channelInfo,
       });
     } finally {
-      try {
-        if (rawVideoFile && fs.existsSync(rawVideoFile)) {
-          fs.unlinkSync(rawVideoFile);
-        }
-      } catch {}
-
-      try {
-        if (finalVideoFile && fs.existsSync(finalVideoFile)) {
-          fs.unlinkSync(finalVideoFile);
-        }
-      } catch {}
+      deleteFileSafe(rawVideoFile);
+      deleteFileSafe(finalVideoFile);
     }
   },
 };
-

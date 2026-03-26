@@ -1,5 +1,6 @@
 import fs from "fs";
 import path from "path";
+import { writeJsonAtomic } from "../../lib/json-store.js";
 import { awardGameCoins } from "../economia/_shared.js";
 
 const DB_DIR = path.join(process.cwd(), "database");
@@ -30,7 +31,7 @@ function readJson(filePath, fallback) {
 }
 
 function writeJson(filePath, data) {
-  fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
+  writeJsonAtomic(filePath, data);
 }
 
 function normalizeMapObject(value) {

@@ -4,6 +4,7 @@ import axios from "axios";
 import { pipeline } from "stream/promises";
 import { spawn } from "child_process";
 import { buildDvyerUrl, getDvyerBaseUrl } from "../../lib/api-manager.js";
+import { bindAbort, buildAbortError, throwIfAborted } from "../../lib/command-abort.js";
 import { getDownloadCache, setDownloadCache, withInflightDedup } from "../../lib/download-cache.js";
 import { chargeDownloadRequest, refundDownloadCharge } from "../economia/download-access.js";
 
@@ -27,6 +28,14 @@ const cooldowns = new Map();
 
 if (!fs.existsSync(TMP_DIR)) {
   fs.mkdirSync(TMP_DIR, { recursive: true });
+}
+
+function deleteFileSafe(filePath) {
+  try {
+    if (filePath && fs.existsSync(filePath)) {
+      fs.unlinkSync(filePath);
+    }
+  } catch {}
 }
 
 function safeFileName(name) {
@@ -336,19 +345,36 @@ async function resolveFastestAudioLinkCached(videoUrl) {
   });
 }
 
-async function downloadAudioFromInternalLink(downloadUrl, outputPath, suggestedFileName = "audio.bin") {
-  const response = await axios.get(downloadUrl, {
-    responseType: "stream",
-    timeout: REQUEST_TIMEOUT,
-    headers: {
-      "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122 Safari/537.36",
-      Accept: "*/*",
-      Referer: `${API_BASE}/`,
-    },
-    validateStatus: () => true,
-    maxRedirects: 5,
-  });
+async function downloadAudioFromInternalLink(
+  downloadUrl,
+  outputPath,
+  suggestedFileName = "audio.bin",
+  options = {}
+) {
+  const signal = options?.signal || null;
+  throwIfAborted(signal);
+
+  let response;
+  try {
+    response = await axios.get(downloadUrl, {
+      responseType: "stream",
+      timeout: REQUEST_TIMEOUT,
+      signal,
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122 Safari/537.36",
+        Accept: "*/*",
+        Referer: `${API_BASE}/`,
+      },
+      validateStatus: () => true,
+      maxRedirects: 5,
+    });
+  } catch (error) {
+    if (signal?.aborted) {
+      throw buildAbortError(signal);
+    }
+    throw error;
+  }
 
   if (response.status >= 400) {
     const errorText = await readStreamToText(response.data).catch(() => "");
@@ -380,7 +406,27 @@ async function downloadAudioFromInternalLink(downloadUrl, outputPath, suggestedF
     }
   });
 
-  await pipeline(response.data, fs.createWriteStream(outputPath));
+  const outputStream = fs.createWriteStream(outputPath);
+  const releaseAbort = bindAbort(signal, () => {
+    const abortError = buildAbortError(signal);
+    response.data?.destroy?.(abortError);
+    outputStream.destroy(abortError);
+    deleteFileSafe(outputPath);
+  });
+
+  try {
+    await pipeline(response.data, outputStream);
+  } catch (error) {
+    deleteFileSafe(outputPath);
+    if (signal?.aborted) {
+      throw buildAbortError(signal);
+    }
+    throw error;
+  } finally {
+    releaseAbort();
+  }
+
+  throwIfAborted(signal);
 
   if (!fs.existsSync(outputPath)) {
     throw new Error("No se pudo descargar el audio.");
@@ -416,17 +462,29 @@ async function downloadAudioFromInternalLink(downloadUrl, outputPath, suggestedF
   };
 }
 
-async function downloadAudioFromApi(videoUrl, outputPath) {
-  const response = await axios.get(API_AUDIO_URL, {
-    responseType: "stream",
-    timeout: REQUEST_TIMEOUT,
-    params: {
-      mode: "file",
-      quality: AUDIO_QUALITY,
-      url: videoUrl,
-    },
-    validateStatus: () => true,
-  });
+async function downloadAudioFromApi(videoUrl, outputPath, options = {}) {
+  const signal = options?.signal || null;
+  throwIfAborted(signal);
+
+  let response;
+  try {
+    response = await axios.get(API_AUDIO_URL, {
+      responseType: "stream",
+      timeout: REQUEST_TIMEOUT,
+      signal,
+      params: {
+        mode: "file",
+        quality: AUDIO_QUALITY,
+        url: videoUrl,
+      },
+      validateStatus: () => true,
+    });
+  } catch (error) {
+    if (signal?.aborted) {
+      throw buildAbortError(signal);
+    }
+    throw error;
+  }
 
   if (response.status >= 400) {
     const errorText = await readStreamToText(response.data).catch(() => "");
@@ -458,7 +516,27 @@ async function downloadAudioFromApi(videoUrl, outputPath) {
     }
   });
 
-  await pipeline(response.data, fs.createWriteStream(outputPath));
+  const outputStream = fs.createWriteStream(outputPath);
+  const releaseAbort = bindAbort(signal, () => {
+    const abortError = buildAbortError(signal);
+    response.data?.destroy?.(abortError);
+    outputStream.destroy(abortError);
+    deleteFileSafe(outputPath);
+  });
+
+  try {
+    await pipeline(response.data, outputStream);
+  } catch (error) {
+    deleteFileSafe(outputPath);
+    if (signal?.aborted) {
+      throw buildAbortError(signal);
+    }
+    throw error;
+  } finally {
+    releaseAbort();
+  }
+
+  throwIfAborted(signal);
 
   if (!fs.existsSync(outputPath)) {
     throw new Error("No se pudo descargar el audio.");
@@ -494,7 +572,10 @@ async function downloadAudioFromApi(videoUrl, outputPath) {
   };
 }
 
-async function convertToMp3(inputPath, outputPath) {
+async function convertToMp3(inputPath, outputPath, options = {}) {
+  const signal = options?.signal || null;
+  throwIfAborted(signal);
+
   return await new Promise((resolve, reject) => {
     const ffmpeg = spawn(
       "ffmpeg",
@@ -521,6 +602,27 @@ async function convertToMp3(inputPath, outputPath) {
     );
 
     let errorText = "";
+    let settled = false;
+    const releaseAbort = bindAbort(signal, () => {
+      deleteFileSafe(outputPath);
+      try {
+        ffmpeg.kill("SIGKILL");
+      } catch {}
+    });
+
+    const finishReject = (error) => {
+      if (settled) return;
+      settled = true;
+      releaseAbort();
+      reject(signal?.aborted ? buildAbortError(signal) : error);
+    };
+
+    const finishResolve = () => {
+      if (settled) return;
+      settled = true;
+      releaseAbort();
+      resolve();
+    };
 
     ffmpeg.stderr.on("data", (chunk) => {
       errorText += chunk.toString();
@@ -528,18 +630,23 @@ async function convertToMp3(inputPath, outputPath) {
 
     ffmpeg.on("error", (error) => {
       if (error?.code === "ENOENT") {
-        reject(new Error("ffmpeg no está instalado en el hosting."));
+        finishReject(new Error("ffmpeg no está instalado en el hosting."));
         return;
       }
-      reject(error);
+      finishReject(error);
     });
 
     ffmpeg.on("close", (code) => {
-      if (code === 0) {
-        resolve();
+      if (signal?.aborted) {
+        finishReject(buildAbortError(signal));
         return;
       }
-      reject(new Error(errorText.trim() || `ffmpeg salió con código ${code}`));
+
+      if (code === 0) {
+        finishResolve();
+        return;
+      }
+      finishReject(new Error(errorText.trim() || `ffmpeg salió con código ${code}`));
     });
   });
 }
@@ -583,6 +690,7 @@ export default {
   run: async (ctx) => {
     const { sock, from } = ctx;
     const msg = ctx.m || ctx.msg || null;
+    const abortSignal = ctx.abortSignal || null;
     const quoted = msg?.key ? { quoted: msg } : undefined;
     const userId = `${from}:audio`;
 
@@ -661,6 +769,7 @@ export default {
 
       const finalTitle = safeFileName(title || "audio");
       let downloadedAudio = null;
+      throwIfAborted(abortSignal);
 
       try {
         const fastestLink = await resolveFastestAudioLinkCached(videoUrl);
@@ -673,13 +782,16 @@ export default {
         downloadedAudio = await downloadAudioFromInternalLink(
           fastestLink.downloadUrl,
           sourceFile,
-          fastestLink.fileName || `${title}.bin`
+          fastestLink.fileName || `${title}.bin`,
+          { signal: abortSignal }
         );
       } catch (linkError) {
         console.log(
           `YTMP3 link fallback: ${linkError?.message || linkError}`
         );
-        downloadedAudio = await downloadAudioFromApi(videoUrl, sourceFile);
+        downloadedAudio = await downloadAudioFromApi(videoUrl, sourceFile, {
+          signal: abortSignal,
+        });
       }
 
       let filePathToSend = downloadedAudio.path;
@@ -688,7 +800,7 @@ export default {
 
       if (!downloadedAudio.isMp3) {
         try {
-          await convertToMp3(sourceFile, finalMp3);
+          await convertToMp3(sourceFile, finalMp3, { signal: abortSignal });
           filePathToSend = finalMp3;
           fileNameToSend = `${title}.mp3`;
           mimeToSend = "audio/mpeg";
@@ -700,6 +812,7 @@ export default {
         }
       }
 
+      throwIfAborted(abortSignal);
       await sendAudioFile(sock, from, quoted, {
         filePath: filePathToSend,
         fileName: fileNameToSend,
@@ -707,6 +820,7 @@ export default {
         title,
       });
     } catch (err) {
+      const aborted = abortSignal?.aborted === true;
       console.error("YTMP3 ERROR:", err?.message || err);
       refundDownloadCharge(ctx, downloadCharge, {
         feature: "ytmp3",
@@ -714,22 +828,17 @@ export default {
       });
       cooldowns.delete(userId);
 
+      if (aborted) {
+        return;
+      }
+
       await sock.sendMessage(from, {
         text: `❌ ${String(err?.message || "Error al procesar el audio.")}`,
         ...global.channelInfo,
       });
     } finally {
-      try {
-        if (sourceFile && fs.existsSync(sourceFile)) {
-          fs.unlinkSync(sourceFile);
-        }
-      } catch {}
-
-      try {
-        if (finalMp3 && fs.existsSync(finalMp3)) {
-          fs.unlinkSync(finalMp3);
-        }
-      } catch {}
+      deleteFileSafe(sourceFile);
+      deleteFileSafe(finalMp3);
     }
   },
 };

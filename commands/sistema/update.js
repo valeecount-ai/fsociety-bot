@@ -1060,11 +1060,7 @@ async function buildUpdateInfo(settings, msg, from, esOwner) {
     head,
     status,
     restartMode,
-    updateMode: gitRepoAvailable
-      ? "git pull"
-      : source
-        ? "GitHub directo"
-        : "sin origen configurado",
+    updateMode: source ? "GitHub directo" : "sin origen configurado",
   };
 }
 
@@ -1073,7 +1069,7 @@ export default {
   command: ["update", "actualizar", "actualiza", "upgrade"],
   category: "sistema",
   description:
-    "Actualiza el bot con git pull o descarga directa desde GitHub; puede reiniciar o dejar los cambios listos para el siguiente reinicio",
+    "Actualiza el bot descargando la ultima version directo desde GitHub; puede reiniciar o dejar los cambios listos para el siguiente reinicio",
 
   run: async ({ sock, msg, from, args = [], esOwner, settings }) => {
     const quoted = msg?.key ? { quoted: msg } : undefined;
@@ -1106,7 +1102,7 @@ export default {
               `Cambios bloqueantes: *${dirtyCount}*\n\n` +
               "Modos:\n" +
               "`.update` = actualiza y reinicia\n" +
-              "`.update pull` = actualiza sin reiniciar",
+              "`.update norestart` = actualiza sin reiniciar",
             ...global.channelInfo,
           },
           quoted
@@ -1160,94 +1156,30 @@ export default {
         ["force", "restart", "reboot"].includes(value)
       );
       const skipRestart = normalizedArgs.some((value) =>
-        ["pull", "norestart", "no-restart", "sinreinicio", "sin-reinicio"].includes(value)
+        ["norestart", "no-restart", "sinreinicio", "sin-reinicio"].includes(value)
       ) && !forceRestart;
       const restartMode = getRestartMode();
-      const gitRepoAvailable = await isInsideGitWorkTree();
-
-      if (gitRepoAvailable) {
-        const mergeConflicts = await getMergeConflictPaths();
-
-        if (mergeConflicts.length) {
-          await sock.sendMessage(
-            from,
-            {
-              text:
-                "*UPDATE BLOQUEADO*\n\n" +
-                "Tu repo ya tiene archivos en conflicto.\n" +
-                `Conflictos: *${mergeConflicts.join(", ")}*\n\n` +
-                "Primero resuelve ese merge y luego vuelve a usar .update.",
-              ...global.channelInfo,
-            },
-            quoted
-          );
-          updateInProgress = false;
-          return;
-        }
-      }
 
       await sock.sendMessage(
         from,
         {
           text:
             "*UPDATE BOT*\n\n" +
-            (gitRepoAvailable
-              ? skipRestart
-                ? "Buscando cambios con git sin reiniciar el proceso...\n"
-                : "Buscando cambios con git y preparando reinicio...\n"
-              : "Git no esta disponible aqui. Voy a descargar la ultima version desde GitHub...\n") +
+            (skipRestart
+              ? "Descargando la ultima version directo desde GitHub sin reiniciar el proceso...\n"
+              : "Descargando la ultima version directo desde GitHub...\n") +
             `Entorno: *${restartMode.label}*`,
           ...global.channelInfo,
         },
         quoted
       );
 
-      let updateResult = null;
-
-      if (gitRepoAvailable) {
-        try {
-          updateResult = await performGitPullUpdate({
-            settings,
-            sock,
-            from,
-            quoted,
-          });
-        } catch (gitError) {
-          const fallbackSource = await resolveUpdateSourceSafe(await resolveCurrentBranch());
-          if (!fallbackSource) {
-            throw gitError;
-          }
-
-          await sock.sendMessage(
-            from,
-            {
-              text:
-                "*UPDATE BOT*\n\n" +
-                "Git pull no se pudo usar en este alojamiento.\n" +
-                `Motivo: ${gitError?.message || "sin detalle"}\n` +
-                "Probando descarga directa desde GitHub...",
-              ...global.channelInfo,
-            },
-            quoted
-          );
-
-          updateResult = await performArchiveUpdate({
-            settings,
-            sock,
-            from,
-            quoted,
-            branchHint: fallbackSource.branch,
-            source: fallbackSource,
-          });
-        }
-      } else {
-        updateResult = await performArchiveUpdate({
-          settings,
-          sock,
-          from,
-          quoted,
-        });
-      }
+      const updateResult = await performArchiveUpdate({
+        settings,
+        sock,
+        from,
+        quoted,
+      });
 
       if (!updateResult.updated && !forceRestart) {
         await sock.sendMessage(

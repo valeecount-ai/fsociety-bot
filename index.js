@@ -1301,15 +1301,45 @@ function resolveSubbotTargetConfig(botId, options = {}) {
 
 // ================= ESTADO =================
 
-const rl = readline.createInterface({
-  input: process.stdin,
-  output: process.stdout,
-});
+const HAS_INTERACTIVE_CONSOLE = Boolean(process.stdin?.isTTY && process.stdout?.isTTY);
+let readlineClosed = !HAS_INTERACTIVE_CONSOLE;
+const rl = HAS_INTERACTIVE_CONSOLE
+  ? readline.createInterface({
+      input: process.stdin,
+      output: process.stdout,
+    })
+  : null;
 
-const preguntar = (q) => new Promise((r) => rl.question(q, r));
+if (rl) {
+  rl.on("close", () => {
+    readlineClosed = true;
+  });
+}
+
+function canPromptInConsole() {
+  return Boolean(HAS_INTERACTIVE_CONSOLE && rl && !readlineClosed);
+}
+
+const preguntar = (q) =>
+  new Promise((resolve, reject) => {
+    if (!canPromptInConsole()) {
+      resolve("");
+      return;
+    }
+
+    try {
+      rl.question(q, resolve);
+    } catch (error) {
+      reject(error);
+    }
+  });
 let promptBusy = false;
 
 async function preguntarSeguro(question) {
+  if (!canPromptInConsole()) {
+    return "";
+  }
+
   while (promptBusy) {
     await delay(200);
   }
@@ -1318,6 +1348,12 @@ async function preguntarSeguro(question) {
 
   try {
     return await preguntar(question);
+  } catch (error) {
+    if (error?.code === "ERR_USE_AFTER_CLOSE") {
+      readlineClosed = true;
+      return "";
+    }
+    throw error;
   } finally {
     promptBusy = false;
   }
@@ -4722,7 +4758,11 @@ function shouldStartSecondaryBot(config = {}) {
 }
 
 function shouldPromptInConsole(botState) {
-  return ownsBotInThisProcess(botState?.config?.id) && botState?.config?.id === "main";
+  return (
+    canPromptInConsole() &&
+    ownsBotInThisProcess(botState?.config?.id) &&
+    botState?.config?.id === "main"
+  );
 }
 
 function shouldAutoRequestPairingCode(botState) {
@@ -6153,7 +6193,7 @@ process.on("SIGINT", () => {
   } catch {}
 
   try {
-    rl.close();
+    rl?.close?.();
   } catch {}
 
   for (const botState of botStates.values()) {

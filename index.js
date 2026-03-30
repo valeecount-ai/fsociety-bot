@@ -1092,7 +1092,9 @@ function shouldProcessUpsertMessage(raw = {}, type = "") {
     return false;
   }
 
-  if (String(type || "").trim().toLowerCase() === "notify") {
+  const normalizedType = String(type || "").trim().toLowerCase();
+
+  if (!normalizedType || normalizedType === "notify" || normalizedType === "replace") {
     return true;
   }
 
@@ -1100,7 +1102,7 @@ function shouldProcessUpsertMessage(raw = {}, type = "") {
     return true;
   }
 
-  if (String(type || "").trim().toLowerCase() !== "append") {
+  if (normalizedType !== "append" && normalizedType !== "history") {
     return false;
   }
 
@@ -6586,11 +6588,18 @@ async function iniciarInstanciaBot(config) {
       }
     });
 
-    botState.sock.ev.on("messages.upsert", async ({ messages, type }) => {
+    const boundSock = botState.sock;
+
+    boundSock.ev.on("messages.upsert", async ({ messages, type }) => {
+      // Ignore late events from a socket that is no longer the active one.
+      if (botState.sock !== boundSock) return;
+
       botState.lastMessageUpsertAt = Date.now();
       markBotSocketActivity(botState, `messages.upsert:${type || "unknown"}`);
 
-      if (type && type !== "notify" && type !== "append") {
+      const normalizedType = String(type || "").trim().toLowerCase();
+      const allowedTypes = new Set(["", "notify", "append", "replace", "ephemeral", "history"]);
+      if (!allowedTypes.has(normalizedType)) {
         return;
       }
 
@@ -6615,10 +6624,11 @@ async function iniciarInstanciaBot(config) {
       }
 
       if (!filteredMessages.length) return;
-      await handleIncomingMessages(botState, botState.sock, filteredMessages);
+      await handleIncomingMessages(botState, boundSock, filteredMessages);
     });
 
-    botState.sock.ev.on("messages.delete", async (update) => {
+    boundSock.ev.on("messages.delete", async (update) => {
+      if (botState.sock !== boundSock) return;
       markBotSocketActivity(botState, "messages.delete");
       const keys = Array.isArray(update?.keys) ? update.keys : [];
 
@@ -6642,7 +6652,7 @@ async function iniciarInstanciaBot(config) {
             }
           } catch {}
 
-          await runMessageDeleteHooks(botState, botState.sock, {
+          await runMessageDeleteHooks(botState, boundSock, {
             update,
             deleteKey: key,
             from: remoteJid,

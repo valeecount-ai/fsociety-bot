@@ -1729,10 +1729,14 @@ const MANAGED_STOP_LOG_THROTTLE_MS = Math.max(
   2_000,
   parseNumberEnv("MANAGED_STOP_LOG_THROTTLE_MS", 12_000) || 12_000
 );
-const SUBBOT_RESERVATION_TIMEOUT_MS = Math.max(
-  30_000,
-  parseNumberEnv("SUBBOT_RESERVATION_TIMEOUT_MS", 60_000) || 60_000
+const RAW_SUBBOT_RESERVATION_TIMEOUT_MS = parseNumberEnv(
+  "SUBBOT_RESERVATION_TIMEOUT_MS",
+  0
 );
+const SUBBOT_RESERVATION_TIMEOUT_MS =
+  RAW_SUBBOT_RESERVATION_TIMEOUT_MS <= 0
+    ? 0
+    : Math.max(30_000, RAW_SUBBOT_RESERVATION_TIMEOUT_MS);
 const GROUP_METADATA_CACHE_TTL_MS = Math.max(
   60_000,
   parseNumberEnv("GROUP_METADATA_CACHE_TTL_MS", 5 * 60 * 1000) || 5 * 60 * 1000
@@ -4970,6 +4974,10 @@ function isSubbotReservationExpired(summary = {}) {
 
 function runSubbotReservationCleanup() {
   if (!shouldRunSubbotReservationCleanup()) {
+    return 0;
+  }
+
+  if (SUBBOT_RESERVATION_TIMEOUT_MS <= 0) {
     return 0;
   }
 

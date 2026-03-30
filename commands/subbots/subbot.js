@@ -425,7 +425,26 @@ export default {
         return sock.sendMessage(
           from,
           {
-            text: `Usa: *${prefix}subbot liberar 3*`,
+            text: `Usa: *${prefix}subbot liberar 3 519xxxxxxx*`,
+            ...global.channelInfo,
+          },
+          quoted
+        );
+      }
+
+      const bot = runtime?.getBotSummary?.(`subbot${slot}`);
+      const assignedNumber = normalizeNumber(
+        bot?.requesterNumber || bot?.configuredNumber || bot?.cachedPairingNumber || ""
+      );
+      const providedNumber = normalizeNumber(args[2] || "");
+
+      if (assignedNumber && assignedNumber !== providedNumber) {
+        return sock.sendMessage(
+          from,
+          {
+            text:
+              `Para liberar el slot ${slot} debes confirmar el numero asignado.\n` +
+              `Usa: *${prefix}subbot liberar ${slot} ${assignedNumber}*`,
             ...global.channelInfo,
           },
           quoted

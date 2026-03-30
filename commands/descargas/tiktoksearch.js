@@ -101,17 +101,22 @@ function buildCardButtons(item, sections, prefix) {
   return buttons;
 }
 
-function buildCarouselCards(results, prefix, sections) {
+function buildCarouselCards(results, prefix, sections, mode = "video") {
   return results.map((item, index) => {
     const title = clipText(item?.title || `Video TikTok ${index + 1}`, 72);
     const author = String(item?.author || "usuario").replace(/^@/, "");
     const views = compactNumber(item?.stats?.views || 0);
     const likes = compactNumber(item?.stats?.likes || 0);
     const comments = compactNumber(item?.stats?.comments || 0);
+    const play = String(item?.play || "").trim();
     const cover = String(item?.cover || "").trim() || DEFAULT_CAROUSEL_COVER;
+    const mediaPayload =
+      mode === "video" && play
+        ? { video: { url: play } }
+        : { image: { url: cover } };
 
     return {
-      image: { url: cover },
+      ...mediaPayload,
       title,
       body: `@${author}\n👁️ ${views} | ❤️ ${likes} | 💬 ${comments}`,
       footer: "FSOCIETY BOT • TikTok",
@@ -122,16 +127,34 @@ function buildCarouselCards(results, prefix, sections) {
 
 async function sendCarouselResults(sock, from, quoted, query, results, prefix) {
   const sections = buildSections(results, prefix);
-  const cards = buildCarouselCards(results, prefix, sections);
+  const basePayload = {
+    text: `Resultados para: ${clipText(query, 80)}`,
+    footer: "Toca una tarjeta para descargar",
+    title: "TikTok Search",
+    ...global.channelInfo,
+  };
 
+  try {
+    const videoCards = buildCarouselCards(results, prefix, sections, "video");
+    await sock.sendMessage(
+      from,
+      {
+        ...basePayload,
+        cards: videoCards,
+      },
+      quoted
+    );
+    return;
+  } catch (videoError) {
+    console.error("ttsearch video carousel fallback:", videoError?.message || videoError);
+  }
+
+  const imageCards = buildCarouselCards(results, prefix, sections, "image");
   await sock.sendMessage(
     from,
     {
-      text: `Resultados para: ${clipText(query, 80)}`,
-      footer: "Toca una tarjeta para descargar",
-      title: "TikTok Search",
-      cards,
-      ...global.channelInfo,
+      ...basePayload,
+      cards: imageCards,
     },
     quoted
   );
@@ -166,7 +189,7 @@ export default {
   name: "ttsearch",
   command: ["ttsearch", "ttksearch", "tts", "tiktoksearch"],
   category: "descarga",
-  description: "Busca videos de TikTok y envia carrusel interactivo",
+  description: "Busca videos de TikTok y envia carrusel de videos",
 
   run: async (ctx) => {
     const { sock, msg, from, args, settings } = ctx;

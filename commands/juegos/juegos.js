@@ -45,6 +45,13 @@ export default {
         `- ${prefix}banderas\n` +
         `- ${prefix}tictactoe\n` +
         `- ${prefix}ruleta rojo\n\n` +
+          `Free Fire:\n` +
+          `- ${prefix}ff\n` +
+          `- ${prefix}ffcrear Torneo Semanal\n` +
+          `- ${prefix}ffclan add Clan Alpha\n` +
+          `- ${prefix}ffvs Clan Alpha | Clan Beta | R1\n` +
+          `- ${prefix}ffresultado M1 | Clan Alpha | 2-1 | 15-10\n` +
+          `- ${prefix}fftabla\n\n` +
           `Rankings:\n` +
           `- ${prefix}topjuegos\n` +
           `- ${prefix}topjuegos grupo\n` +

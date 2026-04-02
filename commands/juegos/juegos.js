@@ -48,7 +48,11 @@ export default {
           `Free Fire:\n` +
           `- ${prefix}ff\n` +
           `- ${prefix}ffcrear Torneo Semanal\n` +
+          `- ${prefix}ffreglas\n` +
+          `- ${prefix}ffformato 4v4 | bo3 | rbo7\n` +
           `- ${prefix}ffclan add Clan Alpha\n` +
+          `- ${prefix}ffinscribir Clan Alpha | Nick\n` +
+          `- ${prefix}ffinscritos\n` +
           `- ${prefix}ffvs Clan Alpha | Clan Beta | R1\n` +
           `- ${prefix}ffresultado M1 | Clan Alpha | 2-1 | 15-10\n` +
           `- ${prefix}fftabla\n\n` +

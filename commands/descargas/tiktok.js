@@ -10,7 +10,7 @@ const API_BASE = "https://dv-yer-api.online";
 const API_TIKTOK_URL = `${API_BASE}/ttdlmp4`;
 
 const COOLDOWN_TIME = 0;
-const VIDEO_QUALITY = "hd";
+const DEFAULT_VIDEO_QUALITY = "2";
 const API_LANG = "es";
 const REQUEST_TIMEOUT = 60000;
 const MAX_VIDEO_BYTES = 80 * 1024 * 1024;
@@ -130,6 +130,36 @@ function resolveTikTokUrl(ctx) {
   return extractTikTokUrl(directText) || extractTikTokUrl(quotedText) || "";
 }
 
+function normalizeTikTokQuality(value = "") {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (!normalized) return "";
+
+  if (["hd", "best", "alta", "high"].includes(normalized)) return "hd";
+  if (["sd", "low", "baja", "lite"].includes(normalized)) return "2";
+  if (["1", "2", "3", "4", "5"].includes(normalized)) return normalized;
+
+  const numericMatch = normalized.match(/(\d+)/);
+  if (numericMatch?.[1]) return numericMatch[1];
+
+  return "";
+}
+
+function resolveTikTokQuality(ctx) {
+  const tokens = Array.isArray(ctx?.args) ? ctx.args : [];
+  for (const token of tokens) {
+    const quality = normalizeTikTokQuality(token);
+    if (quality) return quality;
+  }
+  return DEFAULT_VIDEO_QUALITY;
+}
+
+function formatTikTokQualityLabel(quality = "") {
+  const q = String(quality || "").trim().toLowerCase();
+  if (q === "hd" || q === "best") return "HD";
+  if (/^\d+$/.test(q)) return `Slot ${q}`;
+  return q || DEFAULT_VIDEO_QUALITY;
+}
+
 function parseContentDispositionFileName(headerValue) {
   const text = String(headerValue || "");
   const utfMatch = text.match(/filename\*=UTF-8''([^;]+)/i);
@@ -181,14 +211,14 @@ async function apiGet(url, params, timeout = REQUEST_TIMEOUT) {
   return data;
 }
 
-async function requestTikTokMeta(videoUrl) {
+async function requestTikTokMeta(videoUrl, qualityHint) {
   let lastError = "No se pudo obtener metadata del video de TikTok.";
 
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
       const data = await apiGet(API_TIKTOK_URL, {
         mode: "link",
-        quality: VIDEO_QUALITY,
+        quality: qualityHint,
         lang: API_LANG,
         url: videoUrl,
       });
@@ -211,7 +241,7 @@ async function requestTikTokMeta(videoUrl) {
   throw new Error(lastError);
 }
 
-async function downloadTikTokViaApi(videoUrl, fileName) {
+async function downloadTikTokViaApi(videoUrl, fileName, qualityHint) {
   const finalName = normalizeMp4Name(fileName || "tiktok.mp4");
   const tempPath = path.join(
     TMP_DIR,
@@ -224,7 +254,7 @@ async function downloadTikTokViaApi(videoUrl, fileName) {
     maxRedirects: 5,
     params: {
       mode: "file",
-      quality: VIDEO_QUALITY,
+      quality: qualityHint,
       lang: API_LANG,
       url: videoUrl,
     },
@@ -375,11 +405,15 @@ export default {
 
     try {
       const videoUrl = resolveTikTokUrl(ctx);
+      const qualityHint = resolveTikTokQuality(ctx);
+      const qualityLabel = formatTikTokQualityLabel(qualityHint);
 
       if (!videoUrl) {
         cooldowns.delete(userId);
         return sock.sendMessage(from, {
-          text: "❌ Uso: .tiktok <link de TikTok> o responde a un mensaje con el link",
+          text:
+            "❌ Uso: .tiktok <link de TikTok>\n" +
+            "Opcional calidad: .tiktok hd <link> | .tiktok 2 <link>",
           ...global.channelInfo,
         });
       }
@@ -396,14 +430,18 @@ export default {
       await sock.sendMessage(
         from,
         {
-          text: `⬇️ Preparando TikTok...\n\n🎬 api dvyer\n🌐 ${API_BASE}`,
+          text:
+            `⬇️ Preparando TikTok...\n\n` +
+            `🎬 api dvyer\n` +
+            `🎞️ Calidad: ${qualityLabel}\n` +
+            `🌐 ${API_BASE}`,
           ...global.channelInfo,
         },
         quoted
       );
 
-      const meta = await requestTikTokMeta(videoUrl);
-      const downloaded = await downloadTikTokViaApi(videoUrl, meta.fileName);
+      const meta = await requestTikTokMeta(videoUrl, qualityHint);
+      const downloaded = await downloadTikTokViaApi(videoUrl, meta.fileName, qualityHint);
       tempPath = downloaded.tempPath;
 
       await sendTikTokVideo(sock, from, quoted, {

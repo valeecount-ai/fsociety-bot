@@ -1745,8 +1745,28 @@ const CONSOLE_LIVE_TELEMETRY_ENABLED = parseBooleanEnv(
   true
 );
 const CONSOLE_LIVE_TELEMETRY_INTERVAL_MS = Math.max(
-  8_000,
-  parseNumberEnv("CONSOLE_LIVE_TELEMETRY_INTERVAL_MS", 20_000) || 20_000
+  15_000,
+  parseNumberEnv("CONSOLE_LIVE_TELEMETRY_INTERVAL_MS", 60_000) || 60_000
+);
+const CONSOLE_LIVE_TELEMETRY_FORCE_LOG_MS = Math.max(
+  60_000,
+  parseNumberEnv("CONSOLE_LIVE_TELEMETRY_FORCE_LOG_MS", 5 * 60_000) || 5 * 60_000
+);
+const CONSOLE_LIVE_TELEMETRY_CPU_DELTA = Math.max(
+  1,
+  parseNumberEnv("CONSOLE_LIVE_TELEMETRY_CPU_DELTA", 5) || 5
+);
+const CONSOLE_LIVE_TELEMETRY_RAM_DELTA = Math.max(
+  1,
+  parseNumberEnv("CONSOLE_LIVE_TELEMETRY_RAM_DELTA", 5) || 5
+);
+const CONSOLE_LIVE_TELEMETRY_NET_DELTA = Math.max(
+  1,
+  parseNumberEnv("CONSOLE_LIVE_TELEMETRY_NET_DELTA", 12) || 12
+);
+const CONSOLE_LIVE_TELEMETRY_LAT_DELTA = Math.max(
+  1,
+  parseNumberEnv("CONSOLE_LIVE_TELEMETRY_LAT_DELTA", 40) || 40
 );
 const DASHBOARD_AUTO_ENABLED = parseBooleanEnv("DASHBOARD_ENABLED", false);
 const DASHBOARD_AUTO_PORT = Math.max(
@@ -4767,6 +4787,8 @@ function setDashboardConfig(patch = {}) {
 let packageVersionLabelCache = "";
 let networkTrafficSampleCache = null;
 let lastMeasuredLatencyMs = 0;
+let lastLiveTelemetrySnapshot = null;
+let lastLiveTelemetryLogAt = 0;
 
 function getPackageVersionLabel() {
   if (packageVersionLabelCache) {
@@ -4927,6 +4949,33 @@ function startLiveConsoleTelemetryTicker() {
     return;
   }
 
+  const shouldEmitTelemetryLog = (snapshot) => {
+    const now = Date.now();
+
+    if (!lastLiveTelemetrySnapshot) {
+      lastLiveTelemetrySnapshot = snapshot;
+      lastLiveTelemetryLogAt = now;
+      return false;
+    }
+
+    const previous = lastLiveTelemetrySnapshot;
+    const forceByTime = now - Number(lastLiveTelemetryLogAt || 0) >= CONSOLE_LIVE_TELEMETRY_FORCE_LOG_MS;
+    const changedEnough =
+      Math.abs(Number(snapshot.cpuPct || 0) - Number(previous.cpuPct || 0)) >= CONSOLE_LIVE_TELEMETRY_CPU_DELTA ||
+      Math.abs(Number(snapshot.ramPct || 0) - Number(previous.ramPct || 0)) >= CONSOLE_LIVE_TELEMETRY_RAM_DELTA ||
+      Math.abs(Number(snapshot.netPct || 0) - Number(previous.netPct || 0)) >= CONSOLE_LIVE_TELEMETRY_NET_DELTA ||
+      Math.abs(Number(snapshot.latencyMs || 0) - Number(previous.latencyMs || 0)) >= CONSOLE_LIVE_TELEMETRY_LAT_DELTA;
+
+    lastLiveTelemetrySnapshot = snapshot;
+
+    if (!changedEnough && !forceByTime) {
+      return false;
+    }
+
+    lastLiveTelemetryLogAt = now;
+    return true;
+  };
+
   let tick = 0;
 
   const runTick = () => {
@@ -4936,6 +4985,14 @@ function startLiveConsoleTelemetryTicker() {
     collectLiveTelemetrySnapshot(forceLatency)
       .then((snapshot) => {
         const mainState = getMainBotState() || { config: { label: "MAIN" } };
+        if (!mainState?.connectedAt) {
+          return;
+        }
+
+        if (!shouldEmitTelemetryLog(snapshot)) {
+          return;
+        }
+
         logBotEvent(
           mainState,
           "info",
@@ -4949,6 +5006,7 @@ function startLiveConsoleTelemetryTicker() {
 
   liveConsoleTelemetryInterval = setInterval(runTick, CONSOLE_LIVE_TELEMETRY_INTERVAL_MS);
   liveConsoleTelemetryInterval.unref?.();
+  // Warm up first sample without logging.
   runTick();
 }
 

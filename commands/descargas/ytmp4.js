@@ -177,6 +177,7 @@ async function withRetries(task, options = {}) {
   const delayMs = Math.max(0, Number(options?.delayMs || 0));
   const signal = options?.signal || null;
   const label = String(options?.label || "retry-task");
+  const logRetry = options?.logRetry !== false;
   const shouldRetry =
     typeof options?.shouldRetry === "function"
       ? options.shouldRetry
@@ -200,10 +201,12 @@ async function withRetries(task, options = {}) {
         throw error;
       }
 
-      console.warn(
-        `${label} reintento ${attempt}/${attempts}:`,
-        error?.message || error
-      );
+      if (logRetry) {
+        console.log(
+          `${label} reintento ${attempt}/${attempts}:`,
+          error?.message || error
+        );
+      }
 
       const waitMs = delayMs * attempt;
       if (waitMs > 0) {
@@ -380,6 +383,7 @@ async function requestVideoLink(videoUrl, endpointUrl, sourceLabel, options = {}
       delayMs: REQUEST_RETRY_DELAY_MS,
       signal,
       label: `ytmp4-link-${sourceLabel}`,
+      logRetry: false,
       shouldRetry: shouldRetryDownloadError,
     }
   );
@@ -702,6 +706,7 @@ async function downloadVideoFromApiWithFallbacks(videoUrl, outputPath, options =
           delayMs: REQUEST_RETRY_DELAY_MS,
           signal,
           label: `ytmp4-file-${source.sourceLabel}`,
+          logRetry: false,
           shouldRetry: shouldRetryDownloadError,
         }
       );
@@ -715,7 +720,7 @@ async function downloadVideoFromApiWithFallbacks(videoUrl, outputPath, options =
         throw buildAbortError(signal);
       }
 
-      console.warn(`YTMP4 direct fallback ${source.sourceLabel}:`, error?.message || error);
+      console.log(`YTMP4 direct fallback ${source.sourceLabel}:`, error?.message || error);
       errors.push(`${source.sourceLabel}: ${String(error?.message || error)}`);
     }
   }
@@ -999,7 +1004,7 @@ export default {
           allowDocumentFallback: false,
         });
       } catch (sendRawError) {
-        console.warn(
+        console.log(
           "YTMP4 raw send fallback:",
           sendRawError?.message || sendRawError
         );

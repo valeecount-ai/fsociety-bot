@@ -4811,6 +4811,7 @@ function buildDashboardFrame(params = {}) {
 
   const contentWidth = Math.max(72, bodyWidth - 2);
   const systemTitle = `${String(botName || "FSOCIETY BOT").trim().toUpperCase()} : COMMAND DASHBOARD`;
+  const statusLabel = bootReady ? "ONLINE" : "BOOTING";
   const lines = [];
   const row = (text = "") => {
     const clipped = String(text || "").slice(0, contentWidth);
@@ -4844,6 +4845,8 @@ function buildDashboardFrame(params = {}) {
     .replaceAll("_", " ")
     .trim()
     .toUpperCase();
+  const compactManaged = String(managedLabels || "MAIN").replace(/\s+/g, " ");
+  const compactEnabled = String(activeConfigLabels || "MAIN").replace(/\s+/g, " ");
   const moduleLines = modules.slice(0, 3).map((item) => {
     const moduleName = String(item?.name || "MODULE").toUpperCase().padEnd(12, " ");
     const statusLabel = item.percent >= 95 ? "◆ ACTIVE " : item.percent >= 70 ? "◇ STABLE " : "◇ WARNING";
@@ -4861,7 +4864,14 @@ function buildDashboardFrame(params = {}) {
   row(
     composeDashboardHeader(
       `  ⟦ ${systemTitle} ⟧`,
-      `${onlinePulse} ACTIVE`,
+      `${onlinePulse} ${statusLabel}`,
+      contentWidth
+    )
+  );
+  row(
+    composeDashboardHeader(
+      `  ◇ Process: ${compactProcess}   ◇ Session: ${sessionLabel}`,
+      `Build ${versionLabel}`,
       contentWidth
     )
   );
@@ -4873,8 +4883,8 @@ function buildDashboardFrame(params = {}) {
     `◉ Prefix      ${prefixValue}`,
     `◉ Commands    ${commandCount}`,
     `◉ Runtime     ${compactProcess}`,
-    `◉ Session     ${sessionLabel}`,
-    `◉ Build       ${versionLabel}`,
+    `◉ Managed     ${compactManaged}`,
+    `◉ Enabled     ${compactEnabled}`,
   ]);
   emptyRow();
 

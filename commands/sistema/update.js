@@ -152,6 +152,62 @@ function updateRequiresRestart(updateResult = null) {
   return hasRestartSensitiveChanges(updateResult.changedFiles || []);
 }
 
+function canHotApplyWithoutRestart(updateResult = null) {
+  if (!updateResult?.updated) return true;
+  if (updateResult?.depsInstalled) return false;
+
+  const changed = uniquePaths(updateResult?.changedFiles || []);
+  if (!changed.length) return true;
+
+  return changed.every((filePath) => {
+    const normalized = normalizeGitPath(filePath);
+    if (!normalized) return true;
+
+    if (
+      /^readme(\.|$)/i.test(path.basename(normalized)) ||
+      /\.(md|txt|png|jpg|jpeg|gif|webp|svg|ico|map)$/i.test(normalized)
+    ) {
+      return true;
+    }
+
+    if (normalized.startsWith("commands/")) return true;
+    if (normalized === "settings/settings.json") return true;
+
+    return false;
+  });
+}
+
+async function tryApplyHotRuntimeUpdate() {
+  const runtime = global?.botRuntime;
+  if (!runtime || typeof runtime.applyHotRuntimeRefresh !== "function") {
+    return {
+      attempted: false,
+      ok: false,
+      message: "Runtime hot-reload no disponible en este proceso.",
+      detail: null,
+    };
+  }
+
+  try {
+    const detail = await runtime.applyHotRuntimeRefresh("update_command");
+    return {
+      attempted: true,
+      ok: Boolean(detail?.ok),
+      message: detail?.ok
+        ? "Comandos y settings recargados en caliente."
+        : "Intente recarga en caliente, pero hubo errores parciales.",
+      detail,
+    };
+  } catch (error) {
+    return {
+      attempted: true,
+      ok: false,
+      message: `Fallo recarga en caliente: ${String(error?.message || error)}`,
+      detail: null,
+    };
+  }
+}
+
 function normalizeGitPath(value = "") {
   return String(value || "").replace(/\\/g, "/").trim();
 }
@@ -1162,9 +1218,11 @@ export default {
               `Commit: *${info.head}*\n` +
               `Entorno: *${info.restartMode.label}*\n` +
               `Reinicio interno: *${info.restartMode.allowsInternalRestart ? "SI" : "NO"}*\n` +
+              `Hot-reload runtime: *${global?.botRuntime?.applyHotRuntimeRefresh ? "SI" : "NO"}*\n` +
               `Cambios bloqueantes: *${dirtyCount}*\n\n` +
               "Modos:\n" +
               "`.update` = actualiza sin reiniciar\n" +
+              "`.update hot` = actualiza + recarga en caliente\n" +
               "`.update restart` = actualiza y reinicia si el entorno lo permite\n" +
               "`.update norestart` = actualiza sin reiniciar",
             ...global.channelInfo,
@@ -1219,6 +1277,9 @@ export default {
       const forceRestart = normalizedArgs.some((value) =>
         ["force", "restart", "reboot"].includes(value)
       );
+      const requestedHotReload = normalizedArgs.some((value) =>
+        ["hot", "reload", "recargar", "hotreload", "hot-reload"].includes(value)
+      );
       const requestedNoRestart = normalizedArgs.some((value) =>
         ["norestart", "no-restart", "sinreinicio", "sin-reinicio"].includes(value)
       );
@@ -1235,6 +1296,9 @@ export default {
             (skipRestart
               ? `${gitRepoAvailable ? "Actualizando con git pull en modo seguro" : "Descargando la ultima version desde GitHub"} sin reiniciar el proceso...\n`
               : `${gitRepoAvailable ? "Actualizando con git pull" : "Descargando la ultima version desde GitHub"}...\n`) +
+            (requestedHotReload
+              ? "Modo hot-reload: *activo* (intentare recargar comandos/settings)\n"
+              : "") +
             `Entorno: *${restartMode.label}*`,
           ...global.channelInfo,
         },
@@ -1276,7 +1340,22 @@ export default {
       const depsSummary = updateResult.depsInstalled
         ? "Dependencias: *actualizadas*"
         : "Dependencias: *sin cambios*";
-      const restartNeeded = forceRestart || updateRequiresRestart(updateResult);
+      const restartNeededByFiles = forceRestart || updateRequiresRestart(updateResult);
+      const hotReloadEligible = canHotApplyWithoutRestart(updateResult);
+      let hotReloadResult = {
+        attempted: false,
+        ok: false,
+        message: "No ejecutado.",
+      };
+
+      if (updateResult.updated && (requestedHotReload || (skipRestart && hotReloadEligible))) {
+        hotReloadResult = await tryApplyHotRuntimeUpdate();
+      }
+
+      const restartNeeded =
+        forceRestart
+          ? true
+          : restartNeededByFiles && !(hotReloadEligible && hotReloadResult.ok);
 
       if (skipRestart) {
         await sock.sendMessage(
@@ -1292,10 +1371,12 @@ export default {
               `${updateResult.stashSummary}\n` +
               `Detalle: ${updateResult.detailLine}\n` +
               `${updateResult.fallbackNote ? `${updateResult.fallbackNote}\n` : ""}` +
+              `Hot reload: *${hotReloadResult.attempted ? (hotReloadResult.ok ? "OK" : "PARCIAL/ERROR") : "NO EJECUTADO"}*\n` +
+              `${hotReloadResult.attempted ? `Detalle hot: ${hotReloadResult.message}\n` : ""}` +
               "Aplicacion: *sin reinicio*\n\n" +
               (restartNeeded
-                ? "Los archivos ya se actualizaron dentro del VPS, pero los cambios de codigo o dependencias no se cargan por completo hasta usar `.restart` o reiniciar desde tu panel."
-                : "Los cambios ya quedaron aplicados en disco y no hace falta reiniciar por este update."),
+                ? "Los archivos ya se actualizaron en disco. Aun hay cambios que requieren `.restart` para quedar activos."
+                : "Los cambios quedaron aplicados y cargados sin reinicio."),
             ...global.channelInfo,
           },
           quoted

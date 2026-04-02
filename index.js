@@ -4769,7 +4769,10 @@ async function cargarComandos() {
       if (!archivo.name.endsWith(".js")) continue;
 
       try {
-        const mod = await import(pathToFileURL(ruta).href);
+        const fileUrl = pathToFileURL(ruta);
+        const mtimeMs = Number(fs.statSync(ruta).mtimeMs || Date.now());
+        fileUrl.searchParams.set("v", String(Math.floor(mtimeMs)));
+        const mod = await import(fileUrl.href);
         const cmd = mod.default;
 
         if (!cmd || typeof cmd.run !== "function") continue;
@@ -5731,6 +5734,44 @@ function syncSettingsFromDisk() {
   }
 }
 
+async function applyHotRuntimeRefresh(reason = "manual") {
+  const result = {
+    ok: true,
+    reason: String(reason || "manual").slice(0, 60),
+    settingsReloaded: false,
+    commandsReloaded: false,
+    processSync: false,
+    errors: [],
+  };
+
+  try {
+    result.settingsReloaded = Boolean(syncSettingsFromDisk());
+  } catch (error) {
+    result.ok = false;
+    result.errors.push(`settings: ${String(error?.message || error)}`);
+  }
+
+  try {
+    await cargarComandos();
+    result.commandsReloaded = true;
+  } catch (error) {
+    result.ok = false;
+    result.errors.push(`commands: ${String(error?.message || error)}`);
+  }
+
+  try {
+    await syncManagedProcessBots();
+    await syncSplitSubbotProcessPool();
+    flushManagedBotRuntimeStates();
+    result.processSync = true;
+  } catch (error) {
+    result.ok = false;
+    result.errors.push(`process: ${String(error?.message || error)}`);
+  }
+
+  return result;
+}
+
 async function syncManagedProcessBots() {
   syncSettingsFromDisk();
   runSubbotReservationCleanup();
@@ -6314,6 +6355,8 @@ global.botRuntime = {
   restartProcess: (delayMs = PROCESS_RESTART_DELAY_MS) =>
     scheduleProcessRestart(delayMs),
   getRestartMode: () => getRestartMode(),
+  applyHotRuntimeRefresh: async (reason = "manual") =>
+    applyHotRuntimeRefresh(reason),
   getConsoleLines: (limit = 25) =>
     global.consoleBuffer.slice(-Math.max(1, Math.min(80, Number(limit || 25)))),
   getUsageStats: (limit = 5) =>

@@ -6939,6 +6939,119 @@ function buildSubbotRequestState() {
   };
 }
 
+function normalizeInviteCode(value = "") {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  const match = text.match(/chat\.whatsapp\.com\/([0-9A-Za-z]{20,})/i);
+  if (match?.[1]) return match[1];
+  const normalized = text.replace(/[^0-9A-Za-z]/g, "");
+  return normalized.length >= 20 ? normalized : "";
+}
+
+async function joinGroupInviteAllSubbots(inviteCode, options = {}) {
+  const code = normalizeInviteCode(inviteCode);
+  if (!code) {
+    return {
+      ok: false,
+      status: "missing_invite",
+      message: "Falta el enlace/codigo de invitacion.",
+      results: [],
+    };
+  }
+
+  const includeMain = options?.includeMain === true;
+  const delayMs = Math.max(150, Number(options?.delayMs || 750));
+  const results = [];
+
+  const targetConfigs = includeMain
+    ? [buildMainBotConfig(settings), ...SUBBOT_SLOT_CONFIGS.slice()]
+    : SUBBOT_SLOT_CONFIGS.slice();
+
+  for (const config of targetConfigs) {
+    const botId = String(config?.id || "").trim().toLowerCase();
+    if (!botId) continue;
+
+    if (SPLIT_PROCESS_MODE && !ownsBotInThisProcess(botId)) {
+      results.push({
+        botId,
+        slot: Number(config?.slot || 0) || 0,
+        label: String(config?.label || botId).toUpperCase(),
+        displayName: String(config?.displayName || botId),
+        status: "different_process",
+        message: "Este bot corre en otro proceso (modo separado).",
+        groupJid: "",
+      });
+      continue;
+    }
+
+    const botState = botStates.get(botId) || null;
+    const sock = botState?.sock || null;
+
+    if (!sock) {
+      results.push({
+        botId,
+        slot: Number(config?.slot || 0) || 0,
+        label: String(config?.label || botId).toUpperCase(),
+        displayName: String(config?.displayName || botId),
+        status: "no_socket",
+        message: "No hay socket activo (no conectado).",
+        groupJid: "",
+      });
+      continue;
+    }
+
+    try {
+      const groupJid = await sock.groupAcceptInvite(code);
+      results.push({
+        botId,
+        slot: Number(config?.slot || 0) || 0,
+        label: String(config?.label || botId).toUpperCase(),
+        displayName: String(config?.displayName || botId),
+        status: "joined",
+        message: "Unido correctamente.",
+        groupJid: String(groupJid || ""),
+      });
+    } catch (error) {
+      const msg = String(error?.message || error || "");
+      const already =
+        msg.toLowerCase().includes("already") ||
+        msg.toLowerCase().includes("ya eres") ||
+        msg.toLowerCase().includes("ya está") ||
+        msg.toLowerCase().includes("ya esta") ||
+        msg.toLowerCase().includes("participante");
+
+      results.push({
+        botId,
+        slot: Number(config?.slot || 0) || 0,
+        label: String(config?.label || botId).toUpperCase(),
+        displayName: String(config?.displayName || botId),
+        status: already ? "already" : "error",
+        message: msg || "No pude unir este bot al grupo.",
+        groupJid: "",
+      });
+    }
+
+    if (delayMs) {
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
+  }
+
+  const joined = results.filter((r) => r.status === "joined").length;
+  const already = results.filter((r) => r.status === "already").length;
+  const skipped = results.filter((r) => r.status === "different_process" || r.status === "no_socket").length;
+  const failed = results.filter((r) => r.status === "error").length;
+
+  return {
+    ok: true,
+    status: "ok",
+    joined,
+    already,
+    skipped,
+    failed,
+    results,
+  };
+}
+
 function setSubbotMaxSlots(nextValue) {
   const nextSlots = clampSubbotSlots(nextValue);
   const currentSlots = getConfiguredSubbotSlotsCount(settings);
@@ -7192,6 +7305,8 @@ global.botRuntime = {
   },
   setSubbotMaxSlots: (count) => setSubbotMaxSlots(count),
   getSubbotRequestState: () => buildSubbotRequestState(),
+  joinGroupInviteAllSubbots: async (inviteCode, options = {}) =>
+    joinGroupInviteAllSubbots(inviteCode, options),
   setSubbotPublicRequests: (enabled) => {
     ensureSubbotSettings(settings);
     settings.subbot.publicRequests = Boolean(enabled);

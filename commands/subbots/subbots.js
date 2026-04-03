@@ -32,6 +32,15 @@ function parseNumbersList(rawArgs = []) {
   return unique.slice(0, 25);
 }
 
+function extractInviteCode(value = "") {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  const match = text.match(/chat\.whatsapp\.com\/([0-9A-Za-z]{20,})/i);
+  if (match?.[1]) return match[1];
+  const normalized = text.replace(/[^0-9A-Za-z]/g, "");
+  return normalized.length >= 20 ? normalized : "";
+}
+
 function hasOwnerViewAccess(action = "", commandName = "") {
   const normalizedAction = String(action || "").trim().toLowerCase();
   const normalizedCommand = String(commandName || "").trim().toLowerCase();
@@ -143,6 +152,12 @@ function buildOwnerInteractiveSections(bots = [], prefix = ".") {
       title: "Vincular en lote",
       description: "Genera codigos para varios numeros".slice(0, 72),
       id: `${prefix}subbots vincular`,
+    },
+    {
+      header: "BATCH",
+      title: "Unir todos a un grupo",
+      description: "Pega un link e une subbots al grupo".slice(0, 72),
+      id: `${prefix}subbots unir`,
     },
   ];
 
@@ -309,6 +324,107 @@ export default {
             `${okLines}` +
             `${badLines}\n\n` +
             `WhatsApp > Dispositivos vinculados > Vincular con numero de telefono.`,
+          ...global.channelInfo,
+        },
+        quoted
+      );
+    }
+
+    if (["unir", "joinall", "unirgrupo", "entrargrupo", "grupo"].includes(action)) {
+      if (!esOwner) {
+        return sock.sendMessage(
+          from,
+          { text: "Solo el owner puede unir subbots a un grupo.", ...global.channelInfo },
+          quoted
+        );
+      }
+      if (String(botId || "").toLowerCase() !== "main") {
+        return sock.sendMessage(
+          from,
+          {
+            text:
+              "Este comando debe ejecutarse desde el *bot principal (MAIN)*.\n" +
+              `Vista: ${chatStatus}`,
+            ...global.channelInfo,
+          },
+          quoted
+        );
+      }
+      if (!runtime?.joinGroupInviteAllSubbots) {
+        return sock.sendMessage(
+          from,
+          { text: "Tu runtime no soporta join en lote todavia.", ...global.channelInfo },
+          quoted
+        );
+      }
+
+      let inviteCode = extractInviteCode(args.slice(1).join(" "));
+
+      if (!inviteCode && String(from || "").endsWith("@g.us")) {
+        try {
+          const generated = await sock.groupInviteCode(from);
+          inviteCode = extractInviteCode(generated);
+        } catch {
+          inviteCode = "";
+        }
+      }
+
+      if (!inviteCode) {
+        return sock.sendMessage(
+          from,
+          {
+            text:
+              `*UNIR SUBBOTS A UN GRUPO*\n\n` +
+              `Uso:\n` +
+              `*${prefix}subbots unir https://chat.whatsapp.com/XXXX*\n\n` +
+              `Tip: si ejecutas este comando dentro del grupo y el MAIN es admin, puede generar el link solo.`,
+            ...global.channelInfo,
+          },
+          quoted
+        );
+      }
+
+      await sock.sendMessage(
+        from,
+        { text: "Uniendo subbots al grupo... (uno por uno)", ...global.channelInfo },
+        quoted
+      );
+
+      const res = await runtime.joinGroupInviteAllSubbots(inviteCode, { delayMs: 800 });
+      if (!res?.ok) {
+        return sock.sendMessage(
+          from,
+          { text: res?.message || "No pude unir subbots.", ...global.channelInfo },
+          quoted
+        );
+      }
+
+      const lines = (res.results || [])
+        .slice(0, 30)
+        .map((r) => {
+          const tag =
+            r.status === "joined"
+              ? "✅"
+              : r.status === "already"
+                ? "ℹ️"
+                : r.status === "different_process" || r.status === "no_socket"
+                  ? "⏭️"
+                  : "❌";
+          const slotLabel = r.slot ? `#${r.slot}` : r.botId;
+          return `${tag} ${slotLabel} ${r.displayName}: ${String(r.message || r.status).slice(0, 80)}`;
+        })
+        .join("\n");
+
+      return sock.sendMessage(
+        from,
+        {
+          text:
+            `*SUBBOTS UNIDOS AL GRUPO*\n\n` +
+            `Unidos: *${res.joined}*\n` +
+            `Ya estaban: *${res.already}*\n` +
+            `Saltados: *${res.skipped}*\n` +
+            `Fallos: *${res.failed}*\n\n` +
+            `${lines}`,
           ...global.channelInfo,
         },
         quoted

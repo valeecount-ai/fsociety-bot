@@ -5637,6 +5637,16 @@ function summarizeBotState(botState) {
   const connectedForMs =
     connected && botState?.connectedAt ? Math.max(0, Date.now() - botState.connectedAt) : 0;
   const activeCommandStartedAt = Number(botState?.activeCommandStartedAt || 0);
+  const rawUserId = String(botState?.sock?.user?.id || "").trim();
+  const waNumber = rawUserId
+    ? sanitizePhoneNumber(String(rawUserId.split("@")[0] || "").split(":")[0])
+    : "";
+  const waName = String(
+    botState?.sock?.user?.name ||
+      botState?.sock?.user?.verifiedName ||
+      botState?.sock?.user?.notify ||
+      ""
+  ).trim();
 
   return {
     id: String(config.id || ""),
@@ -5657,6 +5667,8 @@ function summarizeBotState(botState) {
     requesterJid: String(config?.requesterJid || ""),
     requestedAt,
     releasedAt: normalizeTimestamp(config?.releasedAt),
+    waNumber,
+    waName,
     connectedForMs,
     hasConfiguredNumber: Boolean(configuredNumber),
     pairingPending: Boolean(botState?.pairingRequested),

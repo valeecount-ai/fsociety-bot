@@ -184,6 +184,8 @@ export function buildSubbotCard(bot, options = {}) {
   const compact = options?.compact !== false;
   const showSensitive = options?.showSensitive === true;
   const assignedNumber = getAssignedSubbotNumber(bot);
+  const waNumber = normalizeNumber(bot?.waNumber || "");
+  const waName = String(bot?.waName || "").trim();
 
   if (compact) {
     return getSubbotCompactLines(bot).join("\n");
@@ -195,6 +197,9 @@ export function buildSubbotCard(bot, options = {}) {
     `Nombre: ${bot.displayName}`,
     `Label: ${bot.label || `SUBBOT${bot.slot}`}`,
     `Numero actual: ${assignedNumber || "Sin numero"}`,
+    ...(showSensitive && bot.connected
+      ? [`WhatsApp real: ${waName || "Sin nombre"} | ${waNumber || "Sin numero"}`]
+      : []),
     `Tiempo activo: ${bot.connected ? formatDuration(bot.connectedForMs || 0) : "No activo ahora"}`,
     `Conectado desde: ${formatMoment(bot.connectedAt, "Sin conexion activa")}`,
     `Solicitud detectada: ${formatMoment(bot.requestedAt, "Sin solicitud reciente")}`,

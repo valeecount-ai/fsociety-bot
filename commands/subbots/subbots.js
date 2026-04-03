@@ -69,6 +69,8 @@ function isSlotOccupied(bot = {}) {
 function buildOwnerSubbotSummary(bot = {}) {
   const number = normalizeNumber(bot.configuredNumber || "");
   const requester = normalizeNumber(bot.requesterNumber || "");
+  const waNumber = normalizeNumber(bot.waNumber || "");
+  const waName = String(bot.waName || "").trim();
   const state =
     bot.connected
       ? "CONECTADO"
@@ -94,6 +96,9 @@ function buildOwnerSubbotSummary(bot = {}) {
     `Slot ${bot.slot} | ${bot.label || `SUBBOT${bot.slot}`}\n` +
     `Bot: ${bot.displayName}\n` +
     `Estado: ${state}\n` +
+    (waNumber || waName
+      ? `WhatsApp: ${waName || "Sin nombre"} | ${waNumber || "Sin numero"}\n`
+      : "") +
     `Numero: ${number || "No definido"}\n` +
     `Solicitante: ${requester || "No definido"}\n` +
     `Desde: ${connectedSince}\n` +

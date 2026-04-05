@@ -224,10 +224,14 @@ export default {
       ? `\nNuevo rol: *${result.newRole}*`
       : "";
 
+    const waName = cleanText(msg?.pushName || msg?.notifyName || "");
+    const numberLine = `${waName ? `${waName} · ` : ""}${formatUser(sender) || "Sin numero"}`;
+
     await sock.sendMessage(from, {
       text:
         `🎉 *SUBISTE DE NIVEL*\n` +
-        `${formatUser(sender)} paso de *${result.previousLevel}* a *${result.newLevel}*${roleText}`,
+        `${numberLine}\n` +
+        `${formatUser(sender)} pasó de *${result.previousLevel}* a *${result.newLevel}*${roleText}`,
       ...global.channelInfo,
     });
   },

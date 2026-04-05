@@ -9,7 +9,7 @@ import { getDownloadCache, setDownloadCache, withInflightDedup } from "../../lib
 import { chargeDownloadRequest, refundDownloadCharge } from "../economia/download-access.js";
 
 const API_AUDIO_PATH = "/ytmp3";
-const API_AUDIO_LEGACY_PATH = "/ytdlmp3";
+const API_AUDIO_LEGACY_PATH = "/ytmp3";
 const API_AUDIO_ALT_PATH = "/ytaltmp3";
 const API_SEARCH_PATH = "/ytsearch";
 const API_BASE = getDvyerBaseUrl();
@@ -19,7 +19,6 @@ const API_AUDIO_ALT_URL = buildDvyerUrl(API_AUDIO_ALT_PATH);
 const API_SEARCH_URL = buildDvyerUrl(API_SEARCH_PATH);
 const AUDIO_SOURCES = [
   { endpointUrl: API_AUDIO_URL, sourceLabel: "principal" },
-  { endpointUrl: API_AUDIO_LEGACY_URL, sourceLabel: "legacy" },
   { endpointUrl: API_AUDIO_ALT_URL, sourceLabel: "alterna" },
 ];
 

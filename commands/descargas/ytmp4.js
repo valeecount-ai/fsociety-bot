@@ -73,6 +73,18 @@ function stripExtension(name) {
   return String(name || "").replace(/\.[^.]+$/i, "");
 }
 
+function isProviderStyledFileName(name = "") {
+  const value = String(name || "").trim().toLowerCase();
+  if (!value) return false;
+  return (
+    value.includes("ytdown") ||
+    value.includes("youtube_media") ||
+    value.includes("yt1s") ||
+    value.includes("ssyoutube") ||
+    /^video(?:[-_ ]?\d+)?\.mp4$/.test(value)
+  );
+}
+
 function isHttpUrl(value) {
   return /^https?:\/\//i.test(String(value || ""));
 }
@@ -1009,14 +1021,16 @@ export default {
         });
       }
 
-      const finalTitle = safeFileName(
-        stripExtension(downloaded.fileName || `${title}.mp4`) || title
-      );
+      const downloadedNameBase = safeFileName(stripExtension(downloaded.fileName || ""));
+      const cleanTitle = safeFileName(title || "video");
+      const finalTitle = isProviderStyledFileName(downloaded.fileName)
+        ? cleanTitle
+        : downloadedNameBase || cleanTitle;
       const rawSendPath = downloaded.path || rawVideoFile;
       const rawSendSize = fs.existsSync(rawSendPath)
         ? fs.statSync(rawSendPath).size
         : downloaded.size;
-      const normalizedFileName = normalizeMp4Name(downloaded.fileName || `${finalTitle}.mp4`);
+      const normalizedFileName = normalizeMp4Name(`${finalTitle}.mp4`);
 
       throwIfAborted(abortSignal);
 

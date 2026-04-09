@@ -6,10 +6,7 @@ import { chargeDownloadRequest, refundDownloadCharge } from "../economia/downloa
 const API_BASE = getDvyerBaseUrl();
 const API_SEARCH_URL = buildDvyerUrl("/ytsearch");
 const VIDEO_ENDPOINTS = [
-  buildDvyerUrl("/ssytdlmp4"),
   buildDvyerUrl("/ytdlmp4"),
-  buildDvyerUrl("/ytmp4"),
-  buildDvyerUrl("/ytaltmp4"),
 ];
 
 const LINK_TIMEOUT_FAST = 90000;

@@ -18,9 +18,11 @@ const DEFAULT_VIDEO_QUALITY = "360p";
 const COOLDOWN_TIME = 0;
 const LINK_CACHE_TTL_MS = 8 * 60 * 1000;
 const LINK_RETRY_ATTEMPTS = 2;
+const ENDPOINT_UNHEALTHY_TTL_MS = 5 * 60 * 1000;
 
 const cooldowns = new Map();
 const linkCache = new Map();
+const endpointUnhealthyUntil = new Map();
 
 function now() {
   return Date.now();
@@ -157,7 +159,11 @@ function normalizeVideoQuality(value) {
 function qualityCandidatesFromRequested(requestedQuality) {
   const normalized = normalizeVideoQuality(requestedQuality) || DEFAULT_VIDEO_QUALITY;
   const selectedValue = qualityValue(normalized);
-  return VIDEO_QUALITIES.filter((item) => qualityValue(item) <= selectedValue);
+  const lowerOrEqual = VIDEO_QUALITIES.filter((item) => qualityValue(item) <= selectedValue);
+  const higher = [...VIDEO_QUALITIES]
+    .filter((item) => qualityValue(item) > selectedValue)
+    .sort((a, b) => qualityValue(a) - qualityValue(b));
+  return [...lowerOrEqual, ...higher];
 }
 
 function parseQualityAndInput(rawInput) {
@@ -184,6 +190,16 @@ function parseQualityAndInput(rawInput) {
     }
   }
 
+  if (!quality) {
+    const tokens = query.split(/\s+/);
+    const lastToken = tokens[tokens.length - 1] || "";
+    const lastQuality = normalizeVideoQuality(lastToken);
+    if (lastQuality) {
+      quality = lastQuality;
+      query = safeText(tokens.slice(0, -1).join(" "));
+    }
+  }
+
   return {
     query,
     quality: quality || DEFAULT_VIDEO_QUALITY,
@@ -204,9 +220,25 @@ function shouldRetryError(error) {
     text.includes("etimedout") ||
     text.includes("429") ||
     text.includes("too many requests") ||
+    text.includes("unauthorized") ||
+    text.includes("401") ||
     text.includes("temporarily") ||
     text.includes("internal")
   );
+}
+
+function isUnauthorizedLikeError(error) {
+  const text = String(error?.message || error || "").toLowerCase();
+  return text.includes("unauthorized") || text.includes("http 401") || text.includes("401");
+}
+
+function isEndpointAvailable(endpointUrl) {
+  const until = endpointUnhealthyUntil.get(endpointUrl) || 0;
+  return until <= now();
+}
+
+function markEndpointTemporarilyUnhealthy(endpointUrl, ttlMs = ENDPOINT_UNHEALTHY_TTL_MS) {
+  endpointUnhealthyUntil.set(endpointUrl, now() + ttlMs);
 }
 
 function hideProviderText(value) {
@@ -214,6 +246,7 @@ function hideProviderText(value) {
     .replace(/https?:\/\/\S+/gi, "[internal]")
     .replace(/yt1s/gi, "internal")
     .replace(/ytdown/gi, "internal")
+    .replace(/ytmp3tube/gi, "internal")
     .replace(/mp3now/gi, "internal")
     .trim();
 }
@@ -226,6 +259,12 @@ function toFriendlyError(error) {
   }
   if (lower.includes("429") || lower.includes("too many requests")) {
     return "Hay muchas solicitudes ahora. Intenta en unos segundos.";
+  }
+  if (lower.includes("unauthorized") || lower.includes("401")) {
+    return "Servicio temporalmente inestable para video. Reintenta en unos segundos.";
+  }
+  if (lower.includes("no se encontro una calidad video disponible")) {
+    return "No se logro la calidad exacta ahora. Intenta de nuevo en unos segundos.";
   }
   return text || "Error al procesar el video.";
 }
@@ -287,6 +326,9 @@ async function requestVideoLink(endpointUrl, videoUrl, quality, signal, { fastMo
       return { streamUrl, title, fileName };
     } catch (error) {
       lastError = error;
+      if (isUnauthorizedLikeError(error)) {
+        markEndpointTemporarilyUnhealthy(endpointUrl);
+      }
       if (attempt >= LINK_RETRY_ATTEMPTS || !shouldRetryError(error)) {
         break;
       }
@@ -304,15 +346,24 @@ async function resolveVideoLink(videoUrl, requestedQuality, signal) {
     return cached;
   }
 
-  const strategies = [
-    { fastMode: true, timeoutMs: LINK_TIMEOUT_FAST, qualities: qualityCandidates },
-    { fastMode: false, timeoutMs: LINK_TIMEOUT_STABLE, qualities: qualityCandidates },
-  ];
+  const selectedValue = qualityValue(requestedQuality || DEFAULT_VIDEO_QUALITY);
+  const strategies =
+    selectedValue > 360
+      ? [
+          { fastMode: false, timeoutMs: LINK_TIMEOUT_STABLE, qualities: qualityCandidates },
+          { fastMode: true, timeoutMs: LINK_TIMEOUT_FAST, qualities: qualityCandidates },
+        ]
+      : [
+          { fastMode: true, timeoutMs: LINK_TIMEOUT_FAST, qualities: qualityCandidates },
+          { fastMode: false, timeoutMs: LINK_TIMEOUT_STABLE, qualities: qualityCandidates },
+        ];
 
   let lastError = null;
   const attempted = new Set();
+  const availableEndpoints = VIDEO_ENDPOINTS.filter((endpointUrl) => isEndpointAvailable(endpointUrl));
+  const endpointOrder = availableEndpoints.length ? availableEndpoints : VIDEO_ENDPOINTS;
   for (const strategy of strategies) {
-    for (const endpointUrl of VIDEO_ENDPOINTS) {
+    for (const endpointUrl of endpointOrder) {
       for (const quality of strategy.qualities) {
         const dedupeKey = `${strategy.fastMode}:${endpointUrl}:${quality}`;
         if (attempted.has(dedupeKey)) continue;

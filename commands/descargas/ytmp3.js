@@ -14,6 +14,14 @@ const LINK_RETRY_ATTEMPTS = 4;
 const COOLDOWN_TIME = 0;
 const CACHE_TTL_MS = 10 * 60 * 1000;
 const SEND_RETRY_ATTEMPTS = 2;
+const AUDIO_SEARCH_LIMIT = 5;
+const AUDIO_MIME_BY_EXTENSION = {
+  mp3: "audio/mpeg",
+  m4a: "audio/mp4",
+  mp4: "audio/mp4",
+  webm: "audio/webm",
+  ogg: "audio/ogg",
+};
 
 const cooldowns = new Map();
 const cache = new Map();
@@ -62,11 +70,11 @@ function buildStatusText({ title, quality, state }) {
   ].join("\n");
 }
 
-function buildReadyCaption({ title, quality }) {
+function buildReadyCaption({ title, quality, format }) {
   return [
     "╭─〔 *𝑫𝑽𝒀𝑬𝑹 • 𝑨𝑼𝑫𝑰𝑶* 〕",
     `┃ ♬ *${displayTitle(title, "audio")}*`,
-    `┃ ⌁ *Calidad:* ${quality}`,
+    `┃ ⌁ *Calidad:* ${quality} • ${format || "MP3"}`,
     "╰─⟡ _Archivo listo_",
   ].join("\n");
 }
@@ -149,6 +157,22 @@ function normalizeApiUrl(url) {
   if (isHttpUrl(value)) return value;
   if (value.startsWith("/")) return `${API_BASE}${value}`;
   return `${API_BASE}/${value}`;
+}
+
+function normalizeAudioExtension(payload) {
+  const fromFormat = String(payload?.format || "").trim().toLowerCase().replace(/[^a-z0-9]/g, "");
+  const fromFile = String(payload?.filename || payload?.fileName || "")
+    .trim()
+    .toLowerCase()
+    .match(/\.([a-z0-9]{2,5})(?:$|\?)/)?.[1];
+  const ext = fromFile || fromFormat || "mp3";
+  if (ext === "mpeg") return "mp3";
+  if (ext === "mp4") return "m4a";
+  return AUDIO_MIME_BY_EXTENSION[ext] ? ext : "mp3";
+}
+
+function audioMimeFromExtension(extension) {
+  return AUDIO_MIME_BY_EXTENSION[String(extension || "").toLowerCase()] || "audio/mpeg";
 }
 
 function pickDownloadUrl(payload) {
@@ -307,6 +331,41 @@ async function resolveVideo(rawInput, signal) {
   return result;
 }
 
+async function resolveAudioCandidates(rawInput, signal) {
+  const videoUrl = extractYouTubeUrl(rawInput);
+  if (videoUrl) {
+    return [{ videoUrl, title: "audio", thumbnail: null }];
+  }
+
+  if (isHttpUrl(rawInput)) {
+    throw new Error("Enviame un link valido de YouTube.");
+  }
+
+  const query = String(rawInput || "").trim().toLowerCase();
+  const cacheKey = `ytsearch:${query}:${AUDIO_SEARCH_LIMIT}`;
+  const cached = readCache(cacheKey);
+  if (Array.isArray(cached) && cached.length) {
+    return cached;
+  }
+
+  const search = await apiGet(API_SEARCH_URL, { q: rawInput, limit: AUDIO_SEARCH_LIMIT }, signal);
+  const results = Array.isArray(search?.results) ? search.results : [];
+  const candidates = results
+    .filter((item) => item?.url)
+    .map((item) => ({
+      videoUrl: String(item.url).trim(),
+      title: displayTitle(item.title || "audio"),
+      thumbnail: item.thumbnail || null,
+    }));
+
+  if (!candidates.length) {
+    throw new Error("No encontre resultados para ese titulo.");
+  }
+
+  writeCache(cacheKey, candidates);
+  return candidates;
+}
+
 async function resolveMp3Link(videoUrl, signal, preferredTitle = "") {
   let payload = null;
   let lastError = null;
@@ -339,6 +398,7 @@ async function resolveMp3Link(videoUrl, signal, preferredTitle = "") {
     throw new Error("No se pudo resolver el enlace de audio.");
   }
 
+  const extension = normalizeAudioExtension(payload);
   const cleanedTitle = safeName(payload?.title || preferredTitle || "audio");
   const fileBase = safeName(
     String(cleanedTitle || "audio").replace(/\.[^.]+$/i, ""),
@@ -347,10 +407,30 @@ async function resolveMp3Link(videoUrl, signal, preferredTitle = "") {
   const result = {
     downloadUrl,
     title: displayTitle(payload?.title || preferredTitle || cleanedTitle, cleanedTitle),
-    fileName: `${fileBase}.mp3`,
+    fileName: `${fileBase}.${extension}`,
     thumbnail: payload?.thumbnail || payload?.image || null,
+    quality: String(payload?.quality || AUDIO_QUALITY).trim() || AUDIO_QUALITY,
+    format: extension.toUpperCase(),
+    mimetype: audioMimeFromExtension(extension),
   };
   return result;
+}
+
+async function resolveFirstWorkingAudio(candidates, signal) {
+  let lastError = null;
+  for (const candidate of candidates) {
+    try {
+      const audio = await resolveMp3Link(candidate.videoUrl, signal, candidate.title);
+      return { video: candidate, audio };
+    } catch (error) {
+      lastError = error;
+      if (!shouldRetryError(error)) {
+        continue;
+      }
+      await sleep(450);
+    }
+  }
+  throw lastError || new Error(`No encontre audio estable despues de probar ${candidates.length} resultados.`);
 }
 
 function toFriendlyError(error) {
@@ -368,6 +448,9 @@ function toFriendlyError(error) {
   if (low.includes("429") || low.includes("too many requests")) {
     return "Hay muchas solicitudes ahora. Intenta en unos segundos.";
   }
+  if (low.includes("no se pudo preparar la descarga de audio")) {
+    return "No encontre un audio estable para ese resultado. Intenta con el link exacto o escribe artista + cancion.";
+  }
   if (low.includes("410") || low.includes("expirado") || low.includes("expired")) {
     return "El enlace temporal expiro mientras WhatsApp lo abria. Reintenta y se generara uno nuevo.";
   }
@@ -381,12 +464,15 @@ function getCooldownRemaining(untilMs) {
   return Math.max(0, Math.ceil((untilMs - now()) / 1000));
 }
 
-async function sendAudioFast(sock, from, quoted, { downloadUrl, fileName, title, thumbnail, videoUrl, signal }) {
+async function sendAudioFast(sock, from, quoted, { downloadUrl, fileName, title, thumbnail, videoUrl, mimetype, quality, format, signal }) {
   let lastError = null;
   const cleanTitle = displayTitle(title, "audio");
+  const cleanQuality = quality || AUDIO_QUALITY;
+  const cleanFormat = format || "MP3";
+  const cleanMime = mimetype || "audio/mpeg";
   const metadata = buildMediaContext({
     title: cleanTitle,
-    body: `MP3 • ${AUDIO_QUALITY} • DVYER`,
+    body: `${cleanFormat} • ${cleanQuality} • DVYER`,
     thumbnail,
     sourceUrl: videoUrl,
   });
@@ -395,7 +481,7 @@ async function sendAudioFast(sock, from, quoted, { downloadUrl, fileName, title,
       from,
       withChannelInfo({
         audio: { url: downloadUrl },
-        mimetype: "audio/mpeg",
+        mimetype: cleanMime,
         ptt: false,
         fileName,
         title: cleanTitle,
@@ -412,10 +498,10 @@ async function sendAudioFast(sock, from, quoted, { downloadUrl, fileName, title,
       from,
       withChannelInfo({
         document: { url: downloadUrl },
-        mimetype: "audio/mpeg",
+        mimetype: cleanMime,
         fileName,
         title: cleanTitle,
-        caption: buildReadyCaption({ title: cleanTitle, quality: AUDIO_QUALITY }),
+        caption: buildReadyCaption({ title: cleanTitle, quality: cleanQuality, format: cleanFormat }),
       }, metadata),
       quoted
     );
@@ -430,7 +516,7 @@ async function sendAudioFast(sock, from, quoted, { downloadUrl, fileName, title,
       from,
       withChannelInfo({
         audio: buffer,
-        mimetype: "audio/mpeg",
+        mimetype: cleanMime,
         ptt: false,
         fileName,
         title: cleanTitle,
@@ -446,10 +532,10 @@ async function sendAudioFast(sock, from, quoted, { downloadUrl, fileName, title,
     from,
     withChannelInfo({
       document: buffer,
-      mimetype: "audio/mpeg",
+      mimetype: cleanMime,
       fileName,
       title: cleanTitle,
-      caption: buildReadyCaption({ title: cleanTitle, quality: AUDIO_QUALITY }),
+      caption: buildReadyCaption({ title: cleanTitle, quality: cleanQuality, format: cleanFormat }),
     }, metadata),
     quoted
   ).catch(() => {
@@ -469,6 +555,9 @@ async function sendAudioWithFreshLink(sock, from, quoted, { videoUrl, initialMp3
         title: mp3.title || fallbackTitle,
         thumbnail: mp3.thumbnail || thumbnail,
         videoUrl,
+        mimetype: mp3.mimetype,
+        quality: mp3.quality,
+        format: mp3.format,
         signal,
       });
       return;
@@ -519,7 +608,8 @@ export default {
       }
 
       throwIfAborted(abortSignal);
-      const video = await resolveVideo(input, abortSignal);
+      const candidates = await resolveAudioCandidates(input, abortSignal);
+      const video = candidates[0];
 
       charged = await chargeDownloadRequest(ctx, {
         feature: "ytmp3",
@@ -549,14 +639,16 @@ export default {
       );
 
       throwIfAborted(abortSignal);
-      const mp3 = await resolveMp3Link(video.videoUrl, abortSignal, video.title);
+      const resolvedAudio = await resolveFirstWorkingAudio(candidates, abortSignal);
+      const mp3 = resolvedAudio.audio;
+      const selectedVideo = resolvedAudio.video;
       throwIfAborted(abortSignal);
 
       await sendAudioWithFreshLink(sock, from, quoted, {
-        videoUrl: video.videoUrl,
+        videoUrl: selectedVideo.videoUrl,
         initialMp3: mp3,
-        fallbackTitle: video.title,
-        thumbnail: video.thumbnail,
+        fallbackTitle: selectedVideo.title,
+        thumbnail: selectedVideo.thumbnail,
         signal: abortSignal,
       });
     } catch (error) {

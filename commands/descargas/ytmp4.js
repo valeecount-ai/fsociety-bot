@@ -406,7 +406,7 @@ async function sendLocalMp4(sock, from, quoted, data) {
     `┃ 🎬 Título: ${clipText(data.title || data.fileName, 80)}`,
     `┃ ⌁ Calidad: ${data.quality || "360p"}`,
     `┃ ◈ Peso: ${humanBytes(data.size)}`,
-    `┃ ⚡ Modo: fallback local`,
+    `┃ ⚡ Modo: stream local estable`,
     "╰─⟡ MP4 listo.",
   ].join("\n");
 
@@ -499,19 +499,6 @@ export default {
         },
         quoted
       );
-
-      try {
-        const remote = await getYtmp4Link(resolved.url, quality, fast);
-
-        await sendRemoteMp4(sock, from, quoted, {
-          ...remote,
-          title: remote.title || resolved.title,
-        });
-
-        return;
-      } catch (remoteError) {
-        console.error("YTMP4 remote mode failed:", remoteError?.message || remoteError);
-      }
 
       const downloaded = await downloadYtmp4Fallback(resolved.url, resolved.title, quality, fast);
       tempPath = downloaded.tempPath;

@@ -1,7 +1,7 @@
-import fs from "fs";
-import fsp from "fs/promises";
 import path from "path";
 import os from "os";
+import fs from "fs";
+import fsp from "fs/promises";
 import http from "http";
 import https from "https";
 import axios from "axios";
@@ -25,28 +25,6 @@ async function ensureTmpDir() {
   await fsp.mkdir(TMP_DIR, { recursive: true });
 }
 
-async function cleanupOldFiles(maxAgeMs = 6 * 60 * 60 * 1000) {
-  try {
-    await ensureTmpDir();
-    const now = Date.now();
-    const entries = await fsp.readdir(TMP_DIR, { withFileTypes: true });
-
-    await Promise.allSettled(
-      entries
-        .filter((entry) => entry.isFile())
-        .map(async (entry) => {
-          const filePath = path.join(TMP_DIR, entry.name);
-          try {
-            const stat = await fsp.stat(filePath);
-            if (now - stat.mtimeMs > maxAgeMs) {
-              await fsp.unlink(filePath);
-            }
-          } catch {}
-        })
-    );
-  } catch {}
-}
-
 async function deleteFileSafe(filePath) {
   try {
     if (filePath) await fsp.unlink(filePath);
@@ -68,12 +46,10 @@ function humanBytes(bytes = 0) {
   const units = ["B", "KB", "MB", "GB"];
   let value = size;
   let index = 0;
-
   while (value >= 1024 && index < units.length - 1) {
     value /= 1024;
     index++;
   }
-
   return `${value >= 100 || index === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[index]}`;
 }
 
@@ -149,52 +125,35 @@ function normalizeQuality(value) {
 function extractQualityAndQuery(input) {
   const tokens = cleanText(input).split(/\s+/).filter(Boolean);
   let quality = "360p";
+  let fast = true;
   const remaining = [];
 
   for (const token of tokens) {
+    const lower = token.toLowerCase();
+
     if (QUALITY_PATTERN.test(token) && quality === "360p") {
       quality = token;
-    } else {
-      remaining.push(token);
+      continue;
     }
+
+    if (lower === "fast" || lower === "-fast" || lower === "--fast") {
+      fast = true;
+      continue;
+    }
+
+    if (lower === "nofast" || lower === "-nofast" || lower === "--nofast") {
+      fast = false;
+      continue;
+    }
+
+    remaining.push(token);
   }
 
   return {
     quality: normalizeQuality(quality),
     query: remaining.join(" ").trim(),
+    fast,
   };
-}
-
-function parseContentDispositionFileName(headerValue) {
-  const text = String(headerValue || "");
-  const utfMatch = text.match(/filename\*=UTF-8''([^;]+)/i);
-  if (utfMatch?.[1]) {
-    try {
-      return decodeURIComponent(utfMatch[1]).replace(/["']/g, "").trim();
-    } catch {}
-  }
-  const normalMatch = text.match(/filename="?([^"]+)"?/i);
-  return normalMatch?.[1]?.trim() || "";
-}
-
-async function readStreamToText(stream) {
-  return await new Promise((resolve, reject) => {
-    let data = "";
-    stream.on("data", (chunk) => {
-      data += chunk.toString();
-    });
-    stream.on("end", () => resolve(data));
-    stream.on("error", reject);
-  });
-}
-
-function extractApiError(data, status) {
-  return (
-    data?.detail ||
-    data?.error?.message ||
-    data?.message ||
-    (status ? `HTTP ${status}` : "Error de API")
-  );
 }
 
 async function resolveInputToUrl(input) {
@@ -211,9 +170,7 @@ async function resolveInputToUrl(input) {
   if (!query) return null;
 
   const results = await yts(query);
-  const video = Array.isArray(results?.videos)
-    ? results.videos.find((item) => item?.url)
-    : null;
+  const video = Array.isArray(results?.videos) ? results.videos.find((item) => item?.url) : null;
 
   if (!video?.url) {
     throw new Error("No encontré resultados en YouTube.");
@@ -228,11 +185,63 @@ async function resolveInputToUrl(input) {
   };
 }
 
-async function downloadYtmp4(videoUrl, preferredName, quality) {
+async function getYtmp4Link(videoUrl, quality, fast = true) {
+  const response = await axios.get(API_YTMP4_URL, {
+    timeout: REQUEST_TIMEOUT,
+    params: {
+      mode: "link",
+      url: videoUrl,
+      quality,
+      fast,
+    },
+    headers: {
+      "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/145 Safari/537.36",
+      Accept: "application/json",
+    },
+    httpAgent: HTTP_AGENT,
+    httpsAgent: HTTPS_AGENT,
+    maxRedirects: 5,
+    validateStatus: () => true,
+  });
+
+  if (response.status >= 400 || !response.data?.ok) {
+    throw new Error(
+      response.data?.detail ||
+      response.data?.error?.message ||
+      response.data?.message ||
+      `HTTP ${response.status}`
+    );
+  }
+
+  const data = response.data;
+  const remoteUrl =
+    data.download_url_full ||
+    data.stream_url_full ||
+    data.direct_url ||
+    data.url;
+
+  if (!remoteUrl) {
+    throw new Error("La API no devolvió una URL de descarga.");
+  }
+
+  return {
+    remoteUrl,
+    title: cleanText(data.title || "YouTube MP4"),
+    fileName: normalizeMp4Name(data.filename || data.title || "youtube-video.mp4"),
+    quality: cleanText(data.quality || data.quality_requested || quality || "360p"),
+    thumbnail: data.thumbnail || "",
+    cached: Boolean(data.cached),
+    availableQualities: Array.isArray(data.available_qualities) ? data.available_qualities : [],
+    expiresIn: Number(data.expires_in_hint_seconds || 0),
+    request: data.request || {},
+  };
+}
+
+async function downloadYtmp4Fallback(videoUrl, preferredName, quality, fast = true) {
   await ensureTmpDir();
 
-  const tempName = `${Date.now()}-${randomUUID()}-ytmp4.mp4`;
-  const outputPath = path.join(TMP_DIR, tempName);
+  const outputPath = path.join(TMP_DIR, `${Date.now()}-${randomUUID()}-ytmp4.mp4`);
 
   const response = await axios.get(API_YTMP4_URL, {
     responseType: "stream",
@@ -241,29 +250,23 @@ async function downloadYtmp4(videoUrl, preferredName, quality) {
       mode: "file",
       url: videoUrl,
       quality,
+      fast,
     },
     headers: {
       "User-Agent":
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/145 Safari/537.36",
       Accept: "*/*",
-      Connection: "keep-alive",
     },
     httpAgent: HTTP_AGENT,
     httpsAgent: HTTPS_AGENT,
     maxRedirects: 5,
     maxBodyLength: Infinity,
     maxContentLength: Infinity,
-    decompress: true,
     validateStatus: () => true,
   });
 
   if (response.status >= 400) {
-    const errorText = await readStreamToText(response.data).catch(() => "");
-    let parsed = null;
-    try {
-      parsed = JSON.parse(errorText);
-    } catch {}
-    throw new Error(extractApiError(parsed || { message: errorText }, response.status));
+    throw new Error(`HTTP ${response.status}`);
   }
 
   const contentLength = Number(response.headers?.["content-length"] || 0);
@@ -287,39 +290,66 @@ async function downloadYtmp4(videoUrl, preferredName, quality) {
   }
 
   const stat = await fsp.stat(outputPath).catch(() => null);
-  if (!stat?.size) {
-    await deleteFileSafe(outputPath);
-    throw new Error("No se pudo guardar el MP4.");
-  }
-
-  if (stat.size < MIN_VIDEO_BYTES) {
+  if (!stat?.size || stat.size < MIN_VIDEO_BYTES) {
     await deleteFileSafe(outputPath);
     throw new Error("El archivo MP4 descargado es inválido.");
   }
 
-  if (stat.size > MAX_VIDEO_BYTES) {
-    await deleteFileSafe(outputPath);
-    throw new Error(`El video pesa ${humanBytes(stat.size)} y supera el límite del bot.`);
-  }
-
-  const headerName = parseContentDispositionFileName(response.headers?.["content-disposition"]);
-  const fileName = normalizeMp4Name(headerName || preferredName || "youtube-video.mp4");
-
   return {
     tempPath: outputPath,
-    fileName,
+    fileName: normalizeMp4Name(preferredName || "youtube-video.mp4"),
     size: stat.size,
-    contentType: response.headers?.["content-type"] || "video/mp4",
   };
 }
 
-async function sendMp4(sock, from, quoted, data) {
+async function sendRemoteMp4(sock, from, quoted, data) {
+  const caption = [
+    "╭─〔 *DVYER • YTMP4* 〕",
+    `┃ 🎬 Título: ${clipText(data.title || data.fileName, 80)}`,
+    `┃ ⌁ Calidad: ${data.quality || "360p"}`,
+    `┃ ⚡ Modo: remoto`,
+    data.cached ? "┃ 🚀 Cache: sí" : "┃ 🚀 Cache: no",
+    "╰─⟡ MP4 listo.",
+  ].join("\n");
+
+  try {
+    await sock.sendMessage(
+      from,
+      {
+        video: { url: data.remoteUrl },
+        mimetype: "video/mp4",
+        fileName: data.fileName,
+        caption,
+        gifPlayback: false,
+        ...global.channelInfo,
+      },
+      quoted
+    );
+    return "video";
+  } catch (e) {}
+
+  await sock.sendMessage(
+    from,
+    {
+      document: { url: data.remoteUrl },
+      mimetype: "video/mp4",
+      fileName: data.fileName,
+      caption,
+      ...global.channelInfo,
+    },
+    quoted
+  );
+
+  return "document";
+}
+
+async function sendLocalMp4(sock, from, quoted, data) {
   const caption = [
     "╭─〔 *DVYER • YTMP4* 〕",
     `┃ 🎬 Título: ${clipText(data.title || data.fileName, 80)}`,
     `┃ ⌁ Calidad: ${data.quality || "360p"}`,
     `┃ ◈ Peso: ${humanBytes(data.size)}`,
-    `┃ ⚡ Envío: ${data.size <= VIDEO_AS_DOCUMENT_THRESHOLD ? "video" : "documento"}`,
+    `┃ ⚡ Modo: fallback local`,
     "╰─⟡ MP4 listo.",
   ].join("\n");
 
@@ -338,9 +368,7 @@ async function sendMp4(sock, from, quoted, data) {
         quoted
       );
       return "video";
-    } catch (error) {
-      console.error("YTMP4 video send fallback:", error?.message || error);
-    }
+    } catch {}
   }
 
   await sock.sendMessage(
@@ -371,10 +399,8 @@ export default {
     let downloadCharge = null;
 
     try {
-      cleanupOldFiles().catch(() => {});
-
       const rawInput = resolveRawInput(ctx);
-      const { quality, query } = extractQualityAndQuery(rawInput);
+      const { quality, query, fast } = extractQualityAndQuery(rawInput);
       const resolved = await resolveInputToUrl(query || rawInput);
 
       if (!resolved?.url) {
@@ -385,9 +411,9 @@ export default {
               "╭─〔 *DVYER • YTMP4* 〕",
               "┃ Uso: .ytmp4 <link o nombre>",
               "┃ Uso: .ytmp4 720p <link o nombre>",
-              "┃ Ejemplo: .ytmp4 ozuna odisea",
-              "┃ Ejemplo: .ytmp4 360p https://youtu.be/xxxx",
-              "╰─⟡ MP4 directo desde la API.",
+              "┃ Uso: .ytmp4 fast <link o nombre>",
+              "┃ Uso: .ytmp4 nofast <link o nombre>",
+              "╰─⟡ MP4 rápido desde DVYER API.",
             ].join("\n"),
             ...global.channelInfo,
           },
@@ -401,7 +427,7 @@ export default {
       });
       if (!downloadCharge?.ok) return;
 
-      const preparingMessage = sock.sendMessage(
+      await sock.sendMessage(
         from,
         {
           text: [
@@ -409,19 +435,31 @@ export default {
             `┃ 🎬 Título: ${clipText(resolved.title, 80)}`,
             resolved.duration ? `┃ ⏱ Duración: ${resolved.duration}` : "┃ ⏱ Duración: detectando",
             `┃ ⌁ Calidad: ${quality}`,
+            `┃ 🚀 Fast: ${fast ? "sí" : "no"}`,
             "╰─⟡ Preparando MP4...",
           ].join("\n"),
           ...global.channelInfo,
         },
         quoted
-      ).catch(() => null);
+      );
 
-      const downloaded = await downloadYtmp4(resolved.url, resolved.title, quality);
+      try {
+        const remote = await getYtmp4Link(resolved.url, quality, fast);
+
+        await sendRemoteMp4(sock, from, quoted, {
+          ...remote,
+          title: remote.title || resolved.title,
+        });
+
+        return;
+      } catch (remoteError) {
+        console.error("YTMP4 remote mode failed:", remoteError?.message || remoteError);
+      }
+
+      const downloaded = await downloadYtmp4Fallback(resolved.url, resolved.title, quality, fast);
       tempPath = downloaded.tempPath;
 
-      await preparingMessage;
-
-      await sendMp4(sock, from, quoted, {
+      await sendLocalMp4(sock, from, quoted, {
         ...downloaded,
         title: path.parse(downloaded.fileName).name || resolved.title,
         quality,

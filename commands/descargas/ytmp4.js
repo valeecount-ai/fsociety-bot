@@ -518,7 +518,7 @@ async function downloadYtmp4Fallback(videoUrl, preferredName, quality, fast = tr
       responseType: "stream",
       timeout: REQUEST_TIMEOUT,
       params: {
-        mode: "file",
+        mode: "stream",
         url: videoUrl,
         quality,
         fast,

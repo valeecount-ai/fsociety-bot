@@ -217,7 +217,7 @@ async function downloadYtmp3(videoUrl, preferredName) {
     responseType: "stream",
     timeout: REQUEST_TIMEOUT,
     params: {
-      mode: "file",
+      mode: "stream",
       url: videoUrl,
     },
     headers: {

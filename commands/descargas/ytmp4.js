@@ -70,6 +70,18 @@ function normalizeMp4Name(name) {
   return `${base || "youtube-video"}.mp4`;
 }
 
+function parseContentDispositionFileName(headerValue) {
+  const text = String(headerValue || "");
+  const utfMatch = text.match(/filename\*=UTF-8''([^;]+)/i);
+  if (utfMatch?.[1]) {
+    try {
+      return decodeURIComponent(utfMatch[1]).replace(/["']/g, "").trim();
+    } catch {}
+  }
+  const normalMatch = text.match(/filename="?([^"]+)"?/i);
+  return normalMatch?.[1]?.trim() || "";
+}
+
 function extractTextFromMessage(message) {
   return (
     message?.text ||

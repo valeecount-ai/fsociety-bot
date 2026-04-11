@@ -13,7 +13,7 @@ import { chargeDownloadRequest, refundDownloadCharge } from "../economia/downloa
 
 const API_YTMP3_URL = buildDvyerUrl("/ytmp3");
 const TMP_DIR = path.join(os.tmpdir(), "dvyer-ytmp3");
-const REQUEST_TIMEOUT = 12 * 60 * 1000;
+const REQUEST_TIMEOUT = 20 * 60 * 1000;
 const MAX_AUDIO_BYTES = 800 * 1024 * 1024;
 const AUDIO_AS_DOCUMENT_THRESHOLD = 80 * 1024 * 1024;
 const MIN_AUDIO_BYTES = 20 * 1024;

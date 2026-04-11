@@ -1,4 +1,5 @@
 import fs from "fs";
+import fsp from "fs/promises";
 import path from "path";
 import os from "os";
 import http from "http";
@@ -14,32 +15,41 @@ const API_YTMP4_URL = buildDvyerUrl("/ytmp4");
 const TMP_DIR = path.join(os.tmpdir(), "dvyer-ytmp4");
 const REQUEST_TIMEOUT = 15 * 60 * 1000;
 const MAX_VIDEO_BYTES = 2 * 1024 * 1024 * 1024;
-const VIDEO_AS_DOCUMENT_THRESHOLD = 80 * 1024 * 1024;
+const VIDEO_AS_DOCUMENT_THRESHOLD = 35 * 1024 * 1024;
 const MIN_VIDEO_BYTES = 64 * 1024;
-const HTTP_AGENT = new http.Agent({ keepAlive: true });
-const HTTPS_AGENT = new https.Agent({ keepAlive: true });
+const HTTP_AGENT = new http.Agent({ keepAlive: true, maxSockets: 20, maxFreeSockets: 10 });
+const HTTPS_AGENT = new https.Agent({ keepAlive: true, maxSockets: 20, maxFreeSockets: 10 });
 const QUALITY_PATTERN = /^(1080p|720p|480p|360p|240p|144p|best|hd|sd|\d{3,4}p?)$/i;
 
-function ensureTmpDir() {
-  fs.mkdirSync(TMP_DIR, { recursive: true });
+async function ensureTmpDir() {
+  await fsp.mkdir(TMP_DIR, { recursive: true });
 }
 
-function cleanupOldFiles(maxAgeMs = 6 * 60 * 60 * 1000) {
-  ensureTmpDir();
-  const now = Date.now();
-  for (const entry of fs.readdirSync(TMP_DIR, { withFileTypes: true })) {
-    if (!entry.isFile()) continue;
-    const filePath = path.join(TMP_DIR, entry.name);
-    try {
-      const stat = fs.statSync(filePath);
-      if (now - stat.mtimeMs > maxAgeMs) fs.unlinkSync(filePath);
-    } catch {}
-  }
-}
-
-function deleteFileSafe(filePath) {
+async function cleanupOldFiles(maxAgeMs = 6 * 60 * 60 * 1000) {
   try {
-    if (filePath && fs.existsSync(filePath)) fs.unlinkSync(filePath);
+    await ensureTmpDir();
+    const now = Date.now();
+    const entries = await fsp.readdir(TMP_DIR, { withFileTypes: true });
+
+    await Promise.allSettled(
+      entries
+        .filter((entry) => entry.isFile())
+        .map(async (entry) => {
+          const filePath = path.join(TMP_DIR, entry.name);
+          try {
+            const stat = await fsp.stat(filePath);
+            if (now - stat.mtimeMs > maxAgeMs) {
+              await fsp.unlink(filePath);
+            }
+          } catch {}
+        })
+    );
+  } catch {}
+}
+
+async function deleteFileSafe(filePath) {
+  try {
+    if (filePath) await fsp.unlink(filePath);
   } catch {}
 }
 
@@ -49,8 +59,7 @@ function cleanText(value = "") {
 
 function clipText(value = "", max = 90) {
   const text = cleanText(value);
-  if (text.length <= max) return text;
-  return `${text.slice(0, Math.max(1, max - 3))}...`;
+  return text.length <= max ? text : `${text.slice(0, Math.max(1, max - 3))}...`;
 }
 
 function humanBytes(bytes = 0) {
@@ -59,10 +68,12 @@ function humanBytes(bytes = 0) {
   const units = ["B", "KB", "MB", "GB"];
   let value = size;
   let index = 0;
+
   while (value >= 1024 && index < units.length - 1) {
     value /= 1024;
-    index += 1;
+    index++;
   }
+
   return `${value >= 100 || index === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[index]}`;
 }
 
@@ -125,25 +136,6 @@ function extractYouTubeUrl(text) {
   return match ? match[0].trim() : "";
 }
 
-function extractQualityAndQuery(input) {
-  const tokens = cleanText(input).split(/\s+/).filter(Boolean);
-  let quality = "360p";
-  const remaining = [];
-
-  for (const token of tokens) {
-    if (QUALITY_PATTERN.test(token) && quality === "360p") {
-      quality = token;
-      continue;
-    }
-    remaining.push(token);
-  }
-
-  return {
-    quality: normalizeQuality(quality),
-    query: remaining.join(" ").trim(),
-  };
-}
-
 function normalizeQuality(value) {
   const text = String(value || "").trim().toLowerCase();
   if (!text) return "360p";
@@ -152,6 +144,25 @@ function normalizeQuality(value) {
   if (text === "best") return "best";
   const match = text.match(/(\d{3,4})/);
   return match ? `${match[1]}p` : "360p";
+}
+
+function extractQualityAndQuery(input) {
+  const tokens = cleanText(input).split(/\s+/).filter(Boolean);
+  let quality = "360p";
+  const remaining = [];
+
+  for (const token of tokens) {
+    if (QUALITY_PATTERN.test(token) && quality === "360p") {
+      quality = token;
+    } else {
+      remaining.push(token);
+    }
+  }
+
+  return {
+    quality: normalizeQuality(quality),
+    query: remaining.join(" ").trim(),
+  };
 }
 
 function parseContentDispositionFileName(headerValue) {
@@ -200,9 +211,12 @@ async function resolveInputToUrl(input) {
   if (!query) return null;
 
   const results = await yts(query);
-  const video = Array.isArray(results?.videos) ? results.videos.find((item) => item?.url) : null;
+  const video = Array.isArray(results?.videos)
+    ? results.videos.find((item) => item?.url)
+    : null;
+
   if (!video?.url) {
-    throw new Error("No encontre resultados en YouTube.");
+    throw new Error("No encontré resultados en YouTube.");
   }
 
   return {
@@ -215,7 +229,8 @@ async function resolveInputToUrl(input) {
 }
 
 async function downloadYtmp4(videoUrl, preferredName, quality) {
-  ensureTmpDir();
+  await ensureTmpDir();
+
   const tempName = `${Date.now()}-${randomUUID()}-ytmp4.mp4`;
   const outputPath = path.join(TMP_DIR, tempName);
 
@@ -231,12 +246,14 @@ async function downloadYtmp4(videoUrl, preferredName, quality) {
       "User-Agent":
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/145 Safari/537.36",
       Accept: "*/*",
+      Connection: "keep-alive",
     },
     httpAgent: HTTP_AGENT,
     httpsAgent: HTTPS_AGENT,
     maxRedirects: 5,
     maxBodyLength: Infinity,
     maxContentLength: Infinity,
+    decompress: true,
     validateStatus: () => true,
   });
 
@@ -251,7 +268,7 @@ async function downloadYtmp4(videoUrl, preferredName, quality) {
 
   const contentLength = Number(response.headers?.["content-length"] || 0);
   if (contentLength > MAX_VIDEO_BYTES) {
-    throw new Error(`El video pesa ${humanBytes(contentLength)} y supera el limite del bot.`);
+    throw new Error(`El video pesa ${humanBytes(contentLength)} y supera el límite del bot.`);
   }
 
   let downloaded = 0;
@@ -263,24 +280,26 @@ async function downloadYtmp4(videoUrl, preferredName, quality) {
   });
 
   try {
-    await pipeline(response.data, fs.createWriteStream(outputPath));
+    await pipeline(response.data, fs.createWriteStream(outputPath, { highWaterMark: 1024 * 1024 }));
   } catch (error) {
-    deleteFileSafe(outputPath);
+    await deleteFileSafe(outputPath);
     throw error;
   }
 
-  if (!fs.existsSync(outputPath)) {
+  const stat = await fsp.stat(outputPath).catch(() => null);
+  if (!stat?.size) {
+    await deleteFileSafe(outputPath);
     throw new Error("No se pudo guardar el MP4.");
   }
 
-  const size = fs.statSync(outputPath).size;
-  if (size < MIN_VIDEO_BYTES) {
-    deleteFileSafe(outputPath);
-    throw new Error("El archivo MP4 descargado es invalido.");
+  if (stat.size < MIN_VIDEO_BYTES) {
+    await deleteFileSafe(outputPath);
+    throw new Error("El archivo MP4 descargado es inválido.");
   }
-  if (size > MAX_VIDEO_BYTES) {
-    deleteFileSafe(outputPath);
-    throw new Error(`El video pesa ${humanBytes(size)} y supera el limite del bot.`);
+
+  if (stat.size > MAX_VIDEO_BYTES) {
+    await deleteFileSafe(outputPath);
+    throw new Error(`El video pesa ${humanBytes(stat.size)} y supera el límite del bot.`);
   }
 
   const headerName = parseContentDispositionFileName(response.headers?.["content-disposition"]);
@@ -289,7 +308,7 @@ async function downloadYtmp4(videoUrl, preferredName, quality) {
   return {
     tempPath: outputPath,
     fileName,
-    size,
+    size: stat.size,
     contentType: response.headers?.["content-type"] || "video/mp4",
   };
 }
@@ -297,10 +316,10 @@ async function downloadYtmp4(videoUrl, preferredName, quality) {
 async function sendMp4(sock, from, quoted, data) {
   const caption = [
     "╭─〔 *DVYER • YTMP4* 〕",
-    `┃ 🎬 Titulo: ${clipText(data.title || data.fileName, 80)}`,
+    `┃ 🎬 Título: ${clipText(data.title || data.fileName, 80)}`,
     `┃ ⌁ Calidad: ${data.quality || "360p"}`,
     `┃ ◈ Peso: ${humanBytes(data.size)}`,
-    `┃ ⚡ Envio: ${data.size <= VIDEO_AS_DOCUMENT_THRESHOLD ? "video" : "documento"}`,
+    `┃ ⚡ Envío: ${data.size <= VIDEO_AS_DOCUMENT_THRESHOLD ? "video" : "documento"}`,
     "╰─⟡ MP4 listo.",
   ].join("\n");
 
@@ -309,7 +328,7 @@ async function sendMp4(sock, from, quoted, data) {
       await sock.sendMessage(
         from,
         {
-          video: { url: data.tempPath },
+          video: fs.createReadStream(data.tempPath),
           mimetype: "video/mp4",
           fileName: data.fileName,
           caption,
@@ -327,7 +346,7 @@ async function sendMp4(sock, from, quoted, data) {
   await sock.sendMessage(
     from,
     {
-      document: { url: data.tempPath },
+      document: fs.createReadStream(data.tempPath),
       mimetype: "video/mp4",
       fileName: data.fileName,
       caption,
@@ -335,6 +354,7 @@ async function sendMp4(sock, from, quoted, data) {
     },
     quoted
   );
+
   return "document";
 }
 
@@ -351,14 +371,14 @@ export default {
     let downloadCharge = null;
 
     try {
-      cleanupOldFiles();
+      cleanupOldFiles().catch(() => {});
 
       const rawInput = resolveRawInput(ctx);
       const { quality, query } = extractQualityAndQuery(rawInput);
       const resolved = await resolveInputToUrl(query || rawInput);
 
       if (!resolved?.url) {
-        return sock.sendMessage(
+        return await sock.sendMessage(
           from,
           {
             text: [
@@ -379,27 +399,27 @@ export default {
         feature: "ytmp4",
         videoUrl: resolved.url,
       });
-      if (!downloadCharge.ok) return;
+      if (!downloadCharge?.ok) return;
 
-      await sock.sendMessage(
+      const preparingMessage = sock.sendMessage(
         from,
         {
           text: [
             "╭─〔 *DVYER • YTMP4* 〕",
-            `┃ 🎬 Titulo: ${clipText(resolved.title, 80)}`,
-            resolved.duration ? `┃ ⏱ Duracion: ${resolved.duration}` : "┃ ⏱ Duracion: detectando",
+            `┃ 🎬 Título: ${clipText(resolved.title, 80)}`,
+            resolved.duration ? `┃ ⏱ Duración: ${resolved.duration}` : "┃ ⏱ Duración: detectando",
             `┃ ⌁ Calidad: ${quality}`,
-            "┃ ⚡ Modo: descarga directa",
-            "┃ ◈ Regla: video hasta 80 MB como video",
             "╰─⟡ Preparando MP4...",
           ].join("\n"),
           ...global.channelInfo,
         },
         quoted
-      );
+      ).catch(() => null);
 
       const downloaded = await downloadYtmp4(resolved.url, resolved.title, quality);
       tempPath = downloaded.tempPath;
+
+      await preparingMessage;
 
       await sendMp4(sock, from, quoted, {
         ...downloaded,
@@ -408,6 +428,7 @@ export default {
       });
     } catch (error) {
       console.error("YTMP4 ERROR:", error?.message || error);
+
       refundDownloadCharge(ctx, downloadCharge, {
         feature: "ytmp4",
         error: String(error?.message || error || "unknown_error"),
@@ -422,7 +443,7 @@ export default {
         quoted
       );
     } finally {
-      deleteFileSafe(tempPath);
+      await deleteFileSafe(tempPath);
     }
   },
 };

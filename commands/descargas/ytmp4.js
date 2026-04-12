@@ -36,15 +36,56 @@ const FFMPEG_MAX_TIMEOUT = 420_000;
 const RATE_LIMIT_MAX = 5;
 const RATE_LIMIT_WINDOW_MS = 60_000;
 const PROVIDER_NAME = "dvyer_ytmp4";
+const TMP_FILE_MAX_AGE_MS = 45 * 60 * 1000;
+const DELETE_RETRIES = 4;
+const DELETE_RETRY_DELAY_MS = 120;
 
 async function ensureTmpDir() {
   await fsp.mkdir(TMP_DIR, { recursive: true });
 }
 
+function waitMs(ms) {
+  return new Promise((resolve) => setTimeout(resolve, Math.max(1, Number(ms || 0))));
+}
+
 async function deleteFileSafe(filePath) {
-  try {
-    if (filePath) await fsp.unlink(filePath);
-  } catch {}
+  const target = String(filePath || "").trim();
+  if (!target) return true;
+
+  for (let attempt = 0; attempt <= DELETE_RETRIES; attempt += 1) {
+    try {
+      await fsp.unlink(target);
+      return true;
+    } catch (error) {
+      const code = String(error?.code || "").toUpperCase();
+      if (code === "ENOENT") return true;
+      const isRetryable = code === "EBUSY" || code === "EPERM" || code === "EACCES";
+      if (isRetryable && attempt < DELETE_RETRIES) {
+        await waitMs(DELETE_RETRY_DELAY_MS * (attempt + 1));
+        continue;
+      }
+      return false;
+    }
+  }
+
+  return false;
+}
+
+async function cleanupOldFiles(maxAgeMs = TMP_FILE_MAX_AGE_MS) {
+  await ensureTmpDir();
+  const safeMaxAge = Math.max(0, Number(maxAgeMs || 0));
+  const now = Date.now();
+  const entries = await fsp.readdir(TMP_DIR, { withFileTypes: true }).catch(() => []);
+
+  for (const entry of entries) {
+    if (!entry?.isFile?.()) continue;
+    const fullPath = path.join(TMP_DIR, entry.name);
+    const stat = await fsp.stat(fullPath).catch(() => null);
+    if (!stat?.mtimeMs) continue;
+    const ageMs = Math.max(0, now - Number(stat.mtimeMs || 0));
+    if (ageMs < safeMaxAge) continue;
+    await deleteFileSafe(fullPath);
+  }
 }
 
 function cleanText(value = "") {
@@ -510,7 +551,7 @@ async function downloadYtmp4Fallback(videoUrl, preferredName, quality, fast = tr
     try {
       await pipeline(response.data, fs.createWriteStream(outputPath));
     } catch (error) {
-      deleteFileSafe(outputPath);
+      await deleteFileSafe(outputPath);
       throw error;
     }
 
@@ -520,11 +561,11 @@ async function downloadYtmp4Fallback(videoUrl, preferredName, quality, fast = tr
 
     const size = fs.statSync(outputPath).size;
     if (size < MIN_VIDEO_BYTES) {
-      deleteFileSafe(outputPath);
+      await deleteFileSafe(outputPath);
       throw new Error("El archivo MP4 descargado es invalido.");
     }
     if (size > MAX_VIDEO_BYTES) {
-      deleteFileSafe(outputPath);
+      await deleteFileSafe(outputPath);
       throw new Error(`El video pesa ${humanBytes(size)} y supera el limite del bot.`);
     }
 
@@ -602,7 +643,7 @@ async function downloadYtmp4Fallback(videoUrl, preferredName, quality, fast = tr
 
     return await downloadFromResponse(response, preferredName);
   } catch (error) {
-    deleteFileSafe(outputPath);
+    await deleteFileSafe(outputPath);
     const linkData = await getYtmp4Link(videoUrl, quality, fast);
     if (!linkData?.remoteUrl) throw error;
     return await downloadFromStream(linkData.remoteUrl, linkData.fileName || preferredName);
@@ -747,10 +788,12 @@ export default {
     const quoted = msg?.key ? { quoted: msg } : undefined;
 
     let tempPath = null;
+    const ownedTempPaths = new Set();
     let downloadCharge = null;
     let sentSuccessfully = false;
 
     try {
+      await cleanupOldFiles();
       const rawInput = resolveRawInput(ctx);
       const { quality, query, fast } = extractQualityAndQuery(rawInput);
       const identity = buildRateIdentity(
@@ -838,6 +881,7 @@ export default {
         }
       );
       tempPath = downloaded.tempPath;
+      if (downloaded?.tempPath) ownedTempPaths.add(downloaded.tempPath);
 
       // En fast priorizamos velocidad, pero con compatibilidad WhatsApp.
       // En nofast mantenemos normalizacion completa.
@@ -845,6 +889,7 @@ export default {
         ? await prepareMp4Fast(downloaded)
         : await remuxMp4Fast(await transcodeMp4Full(downloaded));
       tempPath = prepared.tempPath;
+      if (prepared?.tempPath) ownedTempPaths.add(prepared.tempPath);
       const officialFileName = normalizeMp4Name(resolved.title || prepared.fileName || "youtube-video.mp4");
 
       await sendLocalMp4(sock, from, quoted, {
@@ -862,6 +907,7 @@ export default {
         const fallback = await findLatestTmpMp4();
         if (fallback?.path) {
           tempPath = fallback.path;
+          ownedTempPaths.add(fallback.path);
           try {
             const fallbackName = normalizeMp4Name("youtube-video");
             await sendLocalMp4(sock, from, quoted, {
@@ -898,7 +944,11 @@ export default {
         );
       }
     } finally {
+      for (const filePath of ownedTempPaths) {
+        await deleteFileSafe(filePath);
+      }
       await deleteFileSafe(tempPath);
+      await cleanupOldFiles();
     }
   },
 };

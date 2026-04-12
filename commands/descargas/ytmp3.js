@@ -1,4 +1,5 @@
 import fs from "fs";
+import fsp from "fs/promises";
 import path from "path";
 import os from "os";
 import http from "http";
@@ -33,28 +34,56 @@ const RATE_LIMIT_WINDOW_MS = 60_000;
 const PROVIDER_NAME = "dvyer_ytmp3";
 const HTTP_AGENT = new http.Agent({ keepAlive: true });
 const HTTPS_AGENT = new https.Agent({ keepAlive: true });
+const TMP_FILE_MAX_AGE_MS = 45 * 60 * 1000;
+const DELETE_RETRIES = 4;
+const DELETE_RETRY_DELAY_MS = 120;
 
-function ensureTmpDir() {
-  fs.mkdirSync(TMP_DIR, { recursive: true });
+async function ensureTmpDir() {
+  await fsp.mkdir(TMP_DIR, { recursive: true });
 }
 
-function cleanupOldFiles(maxAgeMs = 6 * 60 * 60 * 1000) {
-  ensureTmpDir();
+function waitMs(ms) {
+  return new Promise((resolve) => setTimeout(resolve, Math.max(1, Number(ms || 0))));
+}
+
+async function cleanupOldFiles(maxAgeMs = TMP_FILE_MAX_AGE_MS) {
+  await ensureTmpDir();
+  const safeMaxAge = Math.max(0, Number(maxAgeMs || 0));
   const now = Date.now();
-  for (const entry of fs.readdirSync(TMP_DIR, { withFileTypes: true })) {
-    if (!entry.isFile()) continue;
+  const entries = await fsp.readdir(TMP_DIR, { withFileTypes: true }).catch(() => []);
+
+  for (const entry of entries) {
+    if (!entry?.isFile?.()) continue;
     const filePath = path.join(TMP_DIR, entry.name);
-    try {
-      const stat = fs.statSync(filePath);
-      if (now - stat.mtimeMs > maxAgeMs) fs.unlinkSync(filePath);
-    } catch {}
+    const stat = await fsp.stat(filePath).catch(() => null);
+    if (!stat?.mtimeMs) continue;
+    const ageMs = Math.max(0, now - Number(stat.mtimeMs || 0));
+    if (ageMs < safeMaxAge) continue;
+    await deleteFileSafe(filePath);
   }
 }
 
-function deleteFileSafe(filePath) {
-  try {
-    if (filePath && fs.existsSync(filePath)) fs.unlinkSync(filePath);
-  } catch {}
+async function deleteFileSafe(filePath) {
+  const target = String(filePath || "").trim();
+  if (!target) return true;
+
+  for (let attempt = 0; attempt <= DELETE_RETRIES; attempt += 1) {
+    try {
+      await fsp.unlink(target);
+      return true;
+    } catch (error) {
+      const code = String(error?.code || "").toUpperCase();
+      if (code === "ENOENT") return true;
+      const isRetryable = code === "EBUSY" || code === "EPERM" || code === "EACCES";
+      if (isRetryable && attempt < DELETE_RETRIES) {
+        await waitMs(DELETE_RETRY_DELAY_MS * (attempt + 1));
+        continue;
+      }
+      return false;
+    }
+  }
+
+  return false;
 }
 
 function cleanText(value = "") {
@@ -265,10 +294,10 @@ async function ensureMp3Compatible(downloaded) {
     );
     const stat = fs.existsSync(outputPath) ? fs.statSync(outputPath) : null;
     if (!stat?.size || stat.size < MIN_AUDIO_BYTES) {
-      deleteFileSafe(outputPath);
+      await deleteFileSafe(outputPath);
       return downloaded;
     }
-    deleteFileSafe(sourcePath);
+    await deleteFileSafe(sourcePath);
     return {
       ...downloaded,
       tempPath: outputPath,
@@ -277,7 +306,7 @@ async function ensureMp3Compatible(downloaded) {
       contentType: "audio/mpeg",
     };
   } catch (error) {
-    deleteFileSafe(outputPath);
+    await deleteFileSafe(outputPath);
     console.warn("YTMP3 compat transcode skipped:", error?.message || error);
     return downloaded;
   }
@@ -323,7 +352,7 @@ async function resolveInputToUrl(input) {
 }
 
 async function downloadYtmp3(videoUrl, preferredName) {
-  ensureTmpDir();
+  await ensureTmpDir();
   const tempName = `${Date.now()}-${randomUUID()}-ytmp3.mp3`;
   const outputPath = path.join(TMP_DIR, tempName);
 
@@ -372,7 +401,7 @@ async function downloadYtmp3(videoUrl, preferredName) {
   try {
     await pipeline(response.data, fs.createWriteStream(outputPath));
   } catch (error) {
-    deleteFileSafe(outputPath);
+    await deleteFileSafe(outputPath);
     throw error;
   }
 
@@ -382,11 +411,11 @@ async function downloadYtmp3(videoUrl, preferredName) {
 
   const size = fs.statSync(outputPath).size;
   if (size < MIN_AUDIO_BYTES) {
-    deleteFileSafe(outputPath);
+    await deleteFileSafe(outputPath);
     throw new Error("El archivo MP3 descargado es invalido.");
   }
   if (size > MAX_AUDIO_BYTES) {
-    deleteFileSafe(outputPath);
+    await deleteFileSafe(outputPath);
     throw new Error(`El MP3 pesa ${humanBytes(size)} y supera el limite del bot.`);
   }
 
@@ -433,7 +462,7 @@ async function downloadCoverImage(coverUrl) {
   if (!buffer.length) throw new Error("cover vacia");
   if (buffer.length > COVER_MAX_BYTES) throw new Error("cover demasiado grande");
 
-  ensureTmpDir();
+  await ensureTmpDir();
   const coverPath = path.join(TMP_DIR, `${Date.now()}-${randomUUID()}-cover.jpg`);
   fs.writeFileSync(coverPath, buffer);
   return coverPath;
@@ -523,7 +552,7 @@ async function writeMp3Metadata(downloaded, resolved) {
     const size = fs.existsSync(outputPath) ? fs.statSync(outputPath).size : 0;
     if (size < MIN_AUDIO_BYTES) throw new Error("metadata output invalido");
 
-    deleteFileSafe(downloaded.tempPath);
+    await deleteFileSafe(downloaded.tempPath);
     return {
       ...downloaded,
       tempPath: outputPath,
@@ -532,7 +561,7 @@ async function writeMp3Metadata(downloaded, resolved) {
       title,
     };
   } catch (error) {
-    deleteFileSafe(outputPath);
+    await deleteFileSafe(outputPath);
     console.warn("YTMP3 metadata skipped:", error?.message || error);
     return {
       ...downloaded,
@@ -540,7 +569,7 @@ async function writeMp3Metadata(downloaded, resolved) {
       title,
     };
   } finally {
-    deleteFileSafe(coverPath);
+    await deleteFileSafe(coverPath);
   }
 }
 
@@ -596,10 +625,11 @@ export default {
     const quoted = msg?.key ? { quoted: msg } : undefined;
 
     let tempPath = null;
+    const ownedTempPaths = new Set();
     let downloadCharge = null;
 
     try {
-      cleanupOldFiles();
+      await cleanupOldFiles();
 
       const input = resolveUserInput(ctx);
       const identity = buildRateIdentity(
@@ -685,10 +715,13 @@ export default {
         }
       );
       tempPath = downloaded.tempPath;
+      if (downloaded?.tempPath) ownedTempPaths.add(downloaded.tempPath);
       const compatible = await ensureMp3Compatible(downloaded);
       tempPath = compatible.tempPath;
+      if (compatible?.tempPath) ownedTempPaths.add(compatible.tempPath);
       const tagged = await writeMp3Metadata(compatible, resolved);
       tempPath = tagged.tempPath;
+      if (tagged?.tempPath) ownedTempPaths.add(tagged.tempPath);
 
       await sendMp3(sock, from, quoted, tagged);
     } catch (error) {
@@ -712,7 +745,11 @@ export default {
         quoted
       );
     } finally {
-      deleteFileSafe(tempPath);
+      for (const filePath of ownedTempPaths) {
+        await deleteFileSafe(filePath);
+      }
+      await deleteFileSafe(tempPath);
+      await cleanupOldFiles();
     }
   },
 };

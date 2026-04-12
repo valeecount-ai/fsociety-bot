@@ -1,50 +1,8 @@
-import fs from "fs";
-import path from "path";
 import {
   findGroupParticipant,
   getParticipantDisplayTag,
   getParticipantMentionJid,
 } from "../../lib/group-compat.js";
-
-const DB_DIR = path.join(process.cwd(), "database");
-const FILE = path.join(DB_DIR, "adminnotify.json");
-
-if (!fs.existsSync(DB_DIR)) {
-  fs.mkdirSync(DB_DIR, { recursive: true });
-}
-
-function normalizeConfig(value = {}) {
-  const source = value && typeof value === "object" ? value : {};
-  return {
-    enabled: source.enabled === true,
-  };
-}
-
-function readStore() {
-  try {
-    if (!fs.existsSync(FILE)) return {};
-    const parsed = JSON.parse(fs.readFileSync(FILE, "utf-8"));
-    if (!parsed || typeof parsed !== "object") return {};
-    return Object.fromEntries(
-      Object.entries(parsed).map(([groupId, config]) => [groupId, normalizeConfig(config)])
-    );
-  } catch {
-    return {};
-  }
-}
-
-function saveStore(store) {
-  fs.writeFileSync(FILE, JSON.stringify(store, null, 2));
-}
-
-function getConfig(groupId, store = null) {
-  const cache = store && typeof store === "object" ? store : readStore();
-  if (!cache[groupId]) {
-    cache[groupId] = normalizeConfig();
-    saveStore(cache);
-  }
-  return cache[groupId];
-}
 
 function getActorCandidate(update = {}) {
   return (
@@ -87,41 +45,30 @@ export default {
 
   async run({ sock, msg, from, args = [] }) {
     const quoted = msg?.key ? { quoted: msg } : undefined;
-    const store = readStore();
-    const config = getConfig(from, store);
     const action = String(args[0] || "status").trim().toLowerCase();
 
-    if (!args.length || action === "status") {
+    if (!args.length || action === "status" || action === "on") {
       return sock.sendMessage(
         from,
         {
           text:
             `*ADMIN NOTIFY*\n\n` +
-            `Estado: *${config.enabled ? "ON" : "OFF"}*\n\n` +
-            `.adminnotify on\n` +
-            `.adminnotify off`,
+            `Estado: *SIEMPRE ACTIVO*\n\n` +
+            `Este aviso queda encendido en todo momento.\n` +
+            `No requiere activacion por grupo.`,
           ...global.channelInfo,
         },
         quoted
       );
     }
 
-    if (action === "on") {
-      store[from] = { ...config, enabled: true };
-      saveStore(store);
-      return sock.sendMessage(
-        from,
-        { text: "✅ AdminNotify activado en este grupo.", ...global.channelInfo },
-        quoted
-      );
-    }
-
     if (action === "off") {
-      store[from] = { ...config, enabled: false };
-      saveStore(store);
       return sock.sendMessage(
         from,
-        { text: "✅ AdminNotify desactivado en este grupo.", ...global.channelInfo },
+        {
+          text: "⚠️ AdminNotify es global y permanente. No se puede apagar.",
+          ...global.channelInfo,
+        },
         quoted
       );
     }
@@ -129,7 +76,7 @@ export default {
     return sock.sendMessage(
       from,
       {
-        text: "Usa .adminnotify on o .adminnotify off",
+        text: "Usa .adminnotify status",
         ...global.channelInfo,
       },
       quoted
@@ -140,9 +87,6 @@ export default {
     if (!update?.id) return;
     const action = String(update.action || "").trim().toLowerCase();
     if (!["promote", "demote"].includes(action)) return;
-
-    const config = getConfig(update.id);
-    if (!config.enabled) return;
 
     let metadata = null;
     try {

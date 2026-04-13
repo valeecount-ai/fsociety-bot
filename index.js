@@ -163,6 +163,7 @@ const BOT_RUNTIME_STATE_DIR = path.join(RUNTIME_DIR, "bot-states");
 const RUNTIME_LOG_DIR = path.join(RUNTIME_DIR, "logs");
 const STRUCTURED_LOG_FILE = path.join(RUNTIME_LOG_DIR, "events.ndjson");
 const GROUP_COMMAND_CLAIM_DIR = path.join(RUNTIME_DIR, "group-command-claims");
+const GROUP_UPDATE_CLAIM_DIR = path.join(RUNTIME_DIR, "group-update-claims");
 
 function normalizeProcessBotId(value = "") {
   const normalized = String(value || "")
@@ -566,6 +567,9 @@ try {
   }
   if (!fs.existsSync(GROUP_COMMAND_CLAIM_DIR)) {
     fs.mkdirSync(GROUP_COMMAND_CLAIM_DIR, { recursive: true });
+  }
+  if (!fs.existsSync(GROUP_UPDATE_CLAIM_DIR)) {
+    fs.mkdirSync(GROUP_UPDATE_CLAIM_DIR, { recursive: true });
   }
   if (!fs.existsSync(TMP_DIR)) {
     fs.mkdirSync(TMP_DIR, { recursive: true });
@@ -1240,6 +1244,219 @@ function cleanupGroupCommandClaimFiles(now = Date.now()) {
       }
     }
   } catch {}
+}
+
+function normalizeGroupUpdateClaimParticipant(value = "") {
+  const normalized = String(normalizeJidUser(value) || "")
+    .trim()
+    .toLowerCase();
+  if (normalized) return normalized;
+  return String(value || "").trim().toLowerCase();
+}
+
+function buildGroupUpdateClaimKey(update = {}) {
+  const groupId = String(update?.id || "").trim().toLowerCase();
+  const action = String(update?.action || "").trim().toLowerCase();
+  const participants = Array.isArray(update?.participants) ? update.participants : [];
+  const participantKeys = Array.from(
+    new Set(
+      participants
+        .map((item) => normalizeGroupUpdateClaimParticipant(item))
+        .filter(Boolean)
+    )
+  ).sort();
+
+  if (!groupId || !action || !participantKeys.length) {
+    return "";
+  }
+
+  return `group_update|${groupId}|${action}|${participantKeys.join(",")}`;
+}
+
+function getGroupUpdateClaimFilePath(claimKey = "") {
+  const normalizedKey = String(claimKey || "").trim();
+  if (!normalizedKey) return "";
+  const digest = crypto.createHash("sha1").update(normalizedKey).digest("hex");
+  return path.join(GROUP_UPDATE_CLAIM_DIR, `${digest}.json`);
+}
+
+function readGroupUpdateClaim(filePath = "") {
+  try {
+    if (!filePath || !fs.existsSync(filePath)) {
+      return null;
+    }
+
+    const parsed = safeReadJson(fs.readFileSync(filePath, "utf-8"), null);
+    if (!parsed || typeof parsed !== "object") {
+      return null;
+    }
+
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+let lastGroupUpdateClaimCleanupAt = 0;
+
+function cleanupGroupUpdateClaimFiles(now = Date.now()) {
+  if (!GROUP_UPDATE_CLAIM_ENABLED) return;
+  if (now - lastGroupUpdateClaimCleanupAt < GROUP_UPDATE_CLAIM_CLEANUP_INTERVAL_MS) {
+    return;
+  }
+
+  lastGroupUpdateClaimCleanupAt = now;
+
+  try {
+    const entries = fs.readdirSync(GROUP_UPDATE_CLAIM_DIR);
+    for (const entry of entries) {
+      if (!entry.endsWith(".json")) continue;
+      const fullPath = path.join(GROUP_UPDATE_CLAIM_DIR, entry);
+      let claimAgeMs = 0;
+      try {
+        const claim = readGroupUpdateClaim(fullPath);
+        const claimedAt = Number(claim?.claimedAt || claim?.updatedAt || 0);
+        if (claimedAt > 0) {
+          claimAgeMs = Math.max(0, now - claimedAt);
+        } else {
+          const stats = fs.statSync(fullPath);
+          claimAgeMs = Math.max(0, now - Number(stats?.mtimeMs || 0));
+        }
+      } catch {
+        claimAgeMs = GROUP_UPDATE_CLAIM_TTL_MS + 1;
+      }
+
+      if (claimAgeMs > GROUP_UPDATE_CLAIM_TTL_MS) {
+        try {
+          fs.rmSync(fullPath, { force: true });
+        } catch {}
+      }
+    }
+  } catch {}
+}
+
+function cleanupLocalGroupUpdateClaimCache(botState, now = Date.now()) {
+  if (!(botState?.groupUpdateClaimCache instanceof Map)) {
+    botState.groupUpdateClaimCache = new Map();
+    return;
+  }
+
+  for (const [key, claimedAt] of botState.groupUpdateClaimCache) {
+    if (!claimedAt || now - Number(claimedAt) > GROUP_UPDATE_CLAIM_TTL_MS) {
+      botState.groupUpdateClaimCache.delete(key);
+    }
+  }
+}
+
+async function reserveGroupUpdateProcessing(botState, update = {}) {
+  if (!GROUP_UPDATE_CLAIM_ENABLED) {
+    return { allowed: true, reason: "disabled" };
+  }
+
+  const claimKey = buildGroupUpdateClaimKey(update);
+  if (!claimKey) {
+    return { allowed: true, reason: "missing_claim_key" };
+  }
+
+  const now = Date.now();
+  cleanupGroupUpdateClaimFiles(now);
+  cleanupLocalGroupUpdateClaimCache(botState, now);
+
+  const localClaimedAt = Number(botState?.groupUpdateClaimCache?.get?.(claimKey) || 0);
+  if (localClaimedAt && now - localClaimedAt <= GROUP_UPDATE_CLAIM_TTL_MS) {
+    return { allowed: false, reason: "local_duplicate" };
+  }
+
+  const claimFilePath = getGroupUpdateClaimFilePath(claimKey);
+  if (!claimFilePath) {
+    return { allowed: true, reason: "missing_claim_path" };
+  }
+
+  const botId = String(botState?.config?.id || "main").trim().toLowerCase();
+  const delayMs = getGroupCommandDelayMs(botId);
+  if (delayMs > 0) {
+    await delay(delayMs);
+  }
+
+  const payload = {
+    claimedAt: Date.now(),
+    claimKey,
+    botId,
+    processPid: process.pid,
+    update: {
+      id: String(update?.id || "").trim(),
+      action: String(update?.action || "").trim().toLowerCase(),
+      participants: Array.isArray(update?.participants)
+        ? update.participants.map((item) => String(item || "").trim()).filter(Boolean)
+        : [],
+    },
+  };
+
+  for (let attempt = 0; attempt < 2; attempt++) {
+    let fileHandle = null;
+    try {
+      fileHandle = fs.openSync(claimFilePath, "wx");
+      fs.writeFileSync(fileHandle, JSON.stringify(payload, null, 2), "utf-8");
+      botState?.groupUpdateClaimCache?.set?.(claimKey, Number(payload.claimedAt || Date.now()));
+      return {
+        allowed: true,
+        reason: "claimed",
+        delayMs,
+      };
+    } catch (error) {
+      const code = String(error?.code || "").trim().toUpperCase();
+      if (code !== "EEXIST") {
+        const fallbackNow = Date.now();
+        const localSeenAt = Number(botState?.groupUpdateClaimCache?.get?.(claimKey) || 0);
+        if (localSeenAt && fallbackNow - localSeenAt <= GROUP_UPDATE_CLAIM_TTL_MS) {
+          return { allowed: false, reason: "local_duplicate_on_error" };
+        }
+        botState?.groupUpdateClaimCache?.set?.(claimKey, fallbackNow);
+        console.error("[group-update-claim] No pude reservar update:", error?.message || error);
+        return {
+          allowed: true,
+          reason: "error_fail_open",
+          delayMs,
+        };
+      }
+
+      const existingClaim = readGroupUpdateClaim(claimFilePath);
+      const existingClaimedAt = Number(
+        existingClaim?.claimedAt || existingClaim?.updatedAt || 0
+      );
+
+      if (
+        !existingClaimedAt ||
+        Date.now() - existingClaimedAt > GROUP_UPDATE_CLAIM_TTL_MS
+      ) {
+        try {
+          fs.rmSync(claimFilePath, { force: true });
+          continue;
+        } catch {}
+      }
+
+      botState?.groupUpdateClaimCache?.set?.(
+        claimKey,
+        existingClaimedAt || Date.now()
+      );
+      return {
+        allowed: false,
+        reason: "claimed_by_other_or_duplicate",
+      };
+    } finally {
+      if (fileHandle !== null) {
+        try {
+          fs.closeSync(fileHandle);
+        } catch {}
+      }
+    }
+  }
+
+  return {
+    allowed: true,
+    reason: "retry_exhausted_fail_open",
+    delayMs,
+  };
 }
 
 function resolveBotDisplayName(botId = "") {
@@ -2398,6 +2615,15 @@ const GROUP_COMMAND_SUBBOT_MAX_DELAY_MS = Math.max(
   60,
   parseNumberEnv("GROUP_COMMAND_SUBBOT_MAX_DELAY_MS", 850) || 850
 );
+const GROUP_UPDATE_CLAIM_ENABLED = parseBooleanEnv("GROUP_UPDATE_CLAIM_ENABLED", true);
+const GROUP_UPDATE_CLAIM_TTL_MS = Math.max(
+  15_000,
+  parseNumberEnv("GROUP_UPDATE_CLAIM_TTL_MS", 120_000) || 120_000
+);
+const GROUP_UPDATE_CLAIM_CLEANUP_INTERVAL_MS = Math.max(
+  20_000,
+  parseNumberEnv("GROUP_UPDATE_CLAIM_CLEANUP_INTERVAL_MS", 90_000) || 90_000
+);
 const GROUP_RESPONDER_NOTICE_ENABLED = parseBooleanEnv("GROUP_RESPONDER_NOTICE_ENABLED", true);
 const GROUP_RESPONDER_NOTICE_COOLDOWN_MS = Math.max(
   60_000,
@@ -3324,6 +3550,7 @@ function ensureBotState(config) {
     downloadQueueCounter: 0,
     groupResponderState: new Map(),
     groupJoinNoticeCache: new Map(),
+    groupUpdateClaimCache: new Map(),
     persistedStateWriteTimer: null,
     persistedStateWritePending: false,
     socketRecoveryTimer: null,
@@ -8334,6 +8561,11 @@ async function iniciarInstanciaBot(config) {
 
     botState.sock.ev.on("group-participants.update", async (update) => {
       markBotSocketActivity(botState, "group-participants.update");
+      const reservation = await reserveGroupUpdateProcessing(botState, update);
+      if (!reservation.allowed) {
+        return;
+      }
+
       if (update?.id) {
         try {
           const meta = await botState.sock.groupMetadata(update.id);

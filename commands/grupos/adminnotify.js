@@ -2,6 +2,7 @@ import {
   findGroupParticipant,
   getParticipantDisplayTag,
   getParticipantMentionJid,
+  normalizeJidUser,
 } from "../../lib/group-compat.js";
 
 function getActorCandidate(update = {}) {
@@ -98,7 +99,16 @@ export default {
     const actorMentionJid = getParticipantMentionJid(metadata || {}, actorParticipant, actorCandidate);
     const actorTag = getParticipantDisplayTag(actorParticipant, actorCandidate);
 
+    const seenTargets = new Set();
     for (const participant of update.participants || []) {
+      const normalizedTarget = String(normalizeJidUser(participant) || participant || "")
+        .trim()
+        .toLowerCase();
+      if (!normalizedTarget || seenTargets.has(normalizedTarget)) {
+        continue;
+      }
+      seenTargets.add(normalizedTarget);
+
       const targetParticipant = findGroupParticipant(metadata || {}, [participant]);
       const targetMentionJid = getParticipantMentionJid(
         metadata || {},

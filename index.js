@@ -13,6 +13,7 @@ import path from "path";
 import os from "os";
 import http from "http";
 import { spawn } from "child_process";
+import crypto from "crypto";
 import { fileURLToPath, pathToFileURL } from "url";
 import { buildDvyerUrl } from "./lib/api-manager.js";
 import {
@@ -161,6 +162,7 @@ const RUNTIME_DIR = path.join(DATABASE_DIR, "runtime");
 const BOT_RUNTIME_STATE_DIR = path.join(RUNTIME_DIR, "bot-states");
 const RUNTIME_LOG_DIR = path.join(RUNTIME_DIR, "logs");
 const STRUCTURED_LOG_FILE = path.join(RUNTIME_LOG_DIR, "events.ndjson");
+const GROUP_COMMAND_CLAIM_DIR = path.join(RUNTIME_DIR, "group-command-claims");
 
 function normalizeProcessBotId(value = "") {
   const normalized = String(value || "")
@@ -561,6 +563,9 @@ try {
   }
   if (!fs.existsSync(BOT_RUNTIME_STATE_DIR)) {
     fs.mkdirSync(BOT_RUNTIME_STATE_DIR, { recursive: true });
+  }
+  if (!fs.existsSync(GROUP_COMMAND_CLAIM_DIR)) {
+    fs.mkdirSync(GROUP_COMMAND_CLAIM_DIR, { recursive: true });
   }
   if (!fs.existsSync(TMP_DIR)) {
     fs.mkdirSync(TMP_DIR, { recursive: true });
@@ -1153,6 +1158,187 @@ function markAndCheckRecentMessage(botState, raw = {}) {
   }
 
   return false;
+}
+
+function getBotGroupCommandPriority(botId = "") {
+  const normalized = String(botId || "")
+    .trim()
+    .toLowerCase();
+  if (normalized === "main") return 0;
+  const slot = getBotSlot(normalized);
+  if (slot >= 1) return slot;
+  return 99;
+}
+
+function getGroupCommandDelayMs(botId = "") {
+  if (getBotGroupCommandPriority(botId) === 0) return 0;
+
+  const slot = Math.max(1, getBotSlot(botId));
+  const computedDelay =
+    GROUP_COMMAND_SUBBOT_BASE_DELAY_MS +
+    Math.max(0, slot - 1) * GROUP_COMMAND_SUBBOT_STEP_DELAY_MS;
+
+  return Math.max(0, Math.min(GROUP_COMMAND_SUBBOT_MAX_DELAY_MS, computedDelay));
+}
+
+function getGroupCommandClaimFilePath(messageKey = "") {
+  const normalizedKey = String(messageKey || "").trim();
+  if (!normalizedKey) return "";
+  const digest = crypto.createHash("sha1").update(normalizedKey).digest("hex");
+  return path.join(GROUP_COMMAND_CLAIM_DIR, `${digest}.json`);
+}
+
+function readGroupCommandClaim(filePath = "") {
+  try {
+    if (!filePath || !fs.existsSync(filePath)) {
+      return null;
+    }
+
+    const parsed = safeReadJson(fs.readFileSync(filePath, "utf-8"), null);
+    if (!parsed || typeof parsed !== "object") {
+      return null;
+    }
+
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+let lastGroupCommandClaimCleanupAt = 0;
+
+function cleanupGroupCommandClaimFiles(now = Date.now()) {
+  if (!GROUP_COMMAND_CLAIM_ENABLED) return;
+  if (now - lastGroupCommandClaimCleanupAt < GROUP_COMMAND_CLAIM_CLEANUP_INTERVAL_MS) {
+    return;
+  }
+
+  lastGroupCommandClaimCleanupAt = now;
+
+  try {
+    const entries = fs.readdirSync(GROUP_COMMAND_CLAIM_DIR);
+    for (const entry of entries) {
+      if (!entry.endsWith(".json")) continue;
+      const fullPath = path.join(GROUP_COMMAND_CLAIM_DIR, entry);
+      let claimAgeMs = 0;
+      try {
+        const claim = readGroupCommandClaim(fullPath);
+        const claimedAt = Number(claim?.claimedAt || claim?.updatedAt || 0);
+        if (claimedAt > 0) {
+          claimAgeMs = Math.max(0, now - claimedAt);
+        } else {
+          const stats = fs.statSync(fullPath);
+          claimAgeMs = Math.max(0, now - Number(stats?.mtimeMs || 0));
+        }
+      } catch {
+        claimAgeMs = GROUP_COMMAND_CLAIM_TTL_MS + 1;
+      }
+
+      if (claimAgeMs > GROUP_COMMAND_CLAIM_TTL_MS) {
+        try {
+          fs.rmSync(fullPath, { force: true });
+        } catch {}
+      }
+    }
+  } catch {}
+}
+
+async function reserveGroupCommandExecution(botState, raw, commandData = {}) {
+  if (!GROUP_COMMAND_CLAIM_ENABLED) {
+    return { allowed: true, reason: "disabled" };
+  }
+
+  const chatId = String(raw?.key?.remoteJid || "").trim();
+  if (!chatId.endsWith("@g.us")) {
+    return { allowed: true, reason: "not_group" };
+  }
+
+  const messageKey = getMessageDedupKey(raw);
+  const claimFilePath = getGroupCommandClaimFilePath(messageKey);
+  if (!claimFilePath) {
+    return { allowed: true, reason: "missing_message_key" };
+  }
+
+  const now = Date.now();
+  cleanupGroupCommandClaimFiles(now);
+
+  const botId = String(botState?.config?.id || "main").trim().toLowerCase();
+  const slot = getBotSlot(botId);
+  const priority = getBotGroupCommandPriority(botId);
+  const delayMs = getGroupCommandDelayMs(botId);
+
+  if (delayMs > 0) {
+    await delay(delayMs);
+  }
+
+  const payload = {
+    claimedAt: Date.now(),
+    chatId,
+    messageId: String(raw?.key?.id || "").trim(),
+    command: String(commandData?.commandName || "").trim().toLowerCase(),
+    botId,
+    slot,
+    priority,
+    processPid: process.pid,
+  };
+
+  for (let attempt = 0; attempt < 2; attempt++) {
+    let fileHandle = null;
+    try {
+      fileHandle = fs.openSync(claimFilePath, "wx");
+      fs.writeFileSync(fileHandle, JSON.stringify(payload, null, 2), "utf-8");
+      return {
+        allowed: true,
+        reason: "claimed",
+        delayMs,
+      };
+    } catch (error) {
+      const code = String(error?.code || "").trim().toUpperCase();
+      if (code !== "EEXIST") {
+        console.error("[group-claim] No pude reservar mensaje de grupo:", error?.message || error);
+        return {
+          allowed: true,
+          reason: "error_fail_open",
+          delayMs,
+        };
+      }
+
+      const existingClaim = readGroupCommandClaim(claimFilePath);
+      const existingClaimedAt = Number(
+        existingClaim?.claimedAt || existingClaim?.updatedAt || 0
+      );
+
+      if (
+        !existingClaimedAt ||
+        Date.now() - existingClaimedAt > GROUP_COMMAND_CLAIM_TTL_MS
+      ) {
+        try {
+          fs.rmSync(claimFilePath, { force: true });
+          continue;
+        } catch {}
+      }
+
+      const winnerBotId = String(existingClaim?.botId || "").trim().toLowerCase();
+      return {
+        allowed: winnerBotId === botId,
+        reason: winnerBotId && winnerBotId !== botId ? "claimed_by_other" : "already_claimed",
+        winnerBotId,
+        delayMs,
+      };
+    } finally {
+      if (fileHandle !== null) {
+        try {
+          fs.closeSync(fileHandle);
+        } catch {}
+      }
+    }
+  }
+
+  return {
+    allowed: true,
+    reason: "retry_exhausted_fail_open",
+    delayMs,
+  };
 }
 
 function shouldProcessUpsertMessage(raw = {}, type = "") {
@@ -2004,6 +2190,27 @@ const GROUP_METADATA_CACHE_TTL_MS = Math.max(
 const GROUP_METADATA_CACHE_MAX_ENTRIES = Math.max(
   50,
   parseNumberEnv("GROUP_METADATA_CACHE_MAX_ENTRIES", 250) || 250
+);
+const GROUP_COMMAND_CLAIM_ENABLED = parseBooleanEnv("GROUP_COMMAND_CLAIM_ENABLED", true);
+const GROUP_COMMAND_CLAIM_TTL_MS = Math.max(
+  20_000,
+  parseNumberEnv("GROUP_COMMAND_CLAIM_TTL_MS", 3 * 60 * 1000) || 3 * 60 * 1000
+);
+const GROUP_COMMAND_CLAIM_CLEANUP_INTERVAL_MS = Math.max(
+  20_000,
+  parseNumberEnv("GROUP_COMMAND_CLAIM_CLEANUP_INTERVAL_MS", 90_000) || 90_000
+);
+const GROUP_COMMAND_SUBBOT_BASE_DELAY_MS = Math.max(
+  40,
+  parseNumberEnv("GROUP_COMMAND_SUBBOT_BASE_DELAY_MS", 180) || 180
+);
+const GROUP_COMMAND_SUBBOT_STEP_DELAY_MS = Math.max(
+  15,
+  parseNumberEnv("GROUP_COMMAND_SUBBOT_STEP_DELAY_MS", 70) || 70
+);
+const GROUP_COMMAND_SUBBOT_MAX_DELAY_MS = Math.max(
+  60,
+  parseNumberEnv("GROUP_COMMAND_SUBBOT_MAX_DELAY_MS", 850) || 850
 );
 
 function scheduleUsageStatsSave() {
@@ -7659,6 +7866,18 @@ async function handleIncomingMessages(botState, sock, messages) {
       if (blockedByHook) continue;
 
       if (!commandData) continue;
+      const cmd = comandos.get(commandData.commandName);
+      if (!cmd) continue;
+
+      const groupReservation = await reserveGroupCommandExecution(
+        botState,
+        raw,
+        commandData
+      );
+      if (!groupReservation.allowed) {
+        continue;
+      }
+
       const contactName =
         m.pushName ||
         getStoreContactName(
@@ -7684,9 +7903,6 @@ async function handleIncomingMessages(botState, sock, messages) {
         botId: botState.config.id,
       });
       failedCommandName = commandData.commandName;
-
-      const cmd = comandos.get(commandData.commandName);
-      if (!cmd) continue;
 
       const commandContext = {
         ...baseContext,

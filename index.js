@@ -1113,15 +1113,14 @@ function parseMessageTimestampToMs(value) {
 
 function getMessageDedupKey(raw = {}) {
   const remoteJid = String(raw?.key?.remoteJid || "").trim();
-  const participant =
-    String(raw?.key?.participant || raw?.key?.participantPn || raw?.key?.participantLid || "").trim();
   const id = String(raw?.key?.id || "").trim();
 
   if (!remoteJid || !id) {
     return "";
   }
 
-  return `${remoteJid}|${participant}|${id}`;
+  // Dedup by chat + message id only. participant can vary across upsert variants.
+  return `${remoteJid}|${id}`;
 }
 
 function markAndCheckRecentMessage(botState, raw = {}) {
@@ -1241,6 +1240,193 @@ function cleanupGroupCommandClaimFiles(now = Date.now()) {
       }
     }
   } catch {}
+}
+
+function resolveBotDisplayName(botId = "") {
+  const normalized = String(botId || "")
+    .trim()
+    .toLowerCase();
+  if (!normalized) return "";
+  if (normalized === "main") {
+    return String(settings?.botName || "Bot principal").trim() || "Bot principal";
+  }
+
+  const config = getBotConfigById(normalized);
+  if (config) {
+    return (
+      String(config.displayName || config.label || normalized).trim() || normalized
+    );
+  }
+
+  return normalized;
+}
+
+function doesGroupUpdateIncludeSelf(sock, update = {}) {
+  const self = normalizeJidUser(sock?.user?.id);
+  if (!self) return false;
+
+  const participants = Array.isArray(update?.participants) ? update.participants : [];
+  for (const value of participants) {
+    if (normalizeJidUser(value) === self) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+async function sendGroupResponderNotice(sock, groupId, text) {
+  if (!sock || !groupId || !text) return false;
+
+  try {
+    await sock.sendMessage(groupId, {
+      text,
+      ...global.channelInfo,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function maybeAnnounceGroupEntry(botState, sock, groupId, action = "") {
+  if (!GROUP_RESPONDER_NOTICE_ENABLED) return;
+  if (!groupId || !groupId.endsWith("@g.us")) return;
+
+  if (!(botState?.groupJoinNoticeCache instanceof Map)) {
+    botState.groupJoinNoticeCache = new Map();
+  }
+
+  const now = Date.now();
+  const lastSentAt = Number(botState.groupJoinNoticeCache.get(groupId) || 0);
+  if (lastSentAt && now - lastSentAt < GROUP_RESPONDER_ENTRY_NOTICE_COOLDOWN_MS) {
+    return;
+  }
+
+  const botId = String(botState?.config?.id || "main")
+    .trim()
+    .toLowerCase();
+  const botName = resolveBotDisplayName(botId) || String(botState?.config?.displayName || "Bot");
+  const mainSummary = summarizeBotConfig(buildMainBotConfig(settings));
+  const mainLikelyAvailable = Boolean(
+    mainSummary?.connected || mainSummary?.registered || mainSummary?.connectionState === "open"
+  );
+
+  let text = "";
+  if (botId === "main") {
+    text =
+      `✅ *${botName}* conectado en este grupo.\n` +
+      `Si hay subbots aqui, quedaran en silencio para evitar spam.`;
+  } else {
+    text =
+      `🤖 *${botName}* conectado.\n` +
+      `Modo anti-spam activo: solo respondera un bot por mensaje.\n` +
+      (mainLikelyAvailable
+        ? `Si el bot principal responde, este subbot se silencia automaticamente.`
+        : `Si el bot principal no esta disponible, este subbot responde como respaldo.`);
+  }
+
+  const sent = await sendGroupResponderNotice(sock, groupId, text);
+  if (sent) {
+    botState.groupJoinNoticeCache.set(groupId, now);
+  }
+}
+
+async function maybeAnnounceResponderTransition(
+  botState,
+  sock,
+  raw,
+  reservation = {}
+) {
+  if (!GROUP_RESPONDER_NOTICE_ENABLED) return;
+
+  const groupId = String(raw?.key?.remoteJid || "").trim();
+  if (!groupId.endsWith("@g.us")) return;
+
+  if (!(botState?.groupResponderState instanceof Map)) {
+    botState.groupResponderState = new Map();
+  }
+
+  const now = Date.now();
+  const botId = String(botState?.config?.id || "main")
+    .trim()
+    .toLowerCase();
+  const previous = botState.groupResponderState.get(groupId) || {
+    mode: "",
+    winnerBotId: "",
+    updatedAt: 0,
+    lastNoticeAt: 0,
+  };
+
+  let nextMode = previous.mode;
+  let winnerBotId = previous.winnerBotId;
+
+  if (reservation.allowed) {
+    nextMode = "active";
+    winnerBotId = botId;
+  } else if (reservation.reason === "claimed_by_other") {
+    nextMode = "standby";
+    winnerBotId = String(reservation.winnerBotId || "").trim().toLowerCase();
+  } else {
+    return;
+  }
+
+  const changed = nextMode !== previous.mode || winnerBotId !== previous.winnerBotId;
+  if (!changed) return;
+
+  botState.groupResponderState.set(groupId, {
+    ...previous,
+    mode: nextMode,
+    winnerBotId,
+    updatedAt: now,
+  });
+
+  if (now - Number(previous.lastNoticeAt || 0) < GROUP_RESPONDER_NOTICE_COOLDOWN_MS) {
+    return;
+  }
+
+  let text = "";
+  const botName = resolveBotDisplayName(botId) || String(botState?.config?.displayName || "Bot");
+
+  if (nextMode === "standby" && botId !== "main") {
+    const winnerName =
+      winnerBotId === "main"
+        ? resolveBotDisplayName("main")
+        : resolveBotDisplayName(winnerBotId) || "otro bot";
+    text =
+      `⚠️ Hay varios bots activos en este grupo.\n` +
+      `🔇 *${botName}* se silenciara para evitar spam.\n` +
+      `✅ Bot activo ahora: *${winnerName}*.`;
+  } else if (
+    nextMode === "active" &&
+    botId !== "main" &&
+    previous.mode === "standby"
+  ) {
+    if (previous.winnerBotId === "main") {
+      text =
+        `⚠️ El bot principal no responde en este momento.\n` +
+        `✅ *${botName}* se activo como respaldo.\n` +
+        `Cuando regrese el principal, este subbot volvera a silencio automatico.`;
+    } else {
+      text =
+        `✅ *${botName}* quedo activo en este grupo.\n` +
+        `Los demas subbots quedan en silencio para evitar spam.`;
+    }
+  } else if (nextMode === "active" && botId === "main" && previous.mode === "standby") {
+    text =
+      `✅ Bot principal activo de nuevo en este grupo.\n` +
+      `Los subbots quedan en silencio para evitar spam.`;
+  }
+
+  if (!text) return;
+
+  const sent = await sendGroupResponderNotice(sock, groupId, text);
+  if (!sent) return;
+
+  botState.groupResponderState.set(groupId, {
+    ...botState.groupResponderState.get(groupId),
+    lastNoticeAt: now,
+  });
 }
 
 async function reserveGroupCommandExecution(botState, raw, commandData = {}) {
@@ -2212,6 +2398,16 @@ const GROUP_COMMAND_SUBBOT_MAX_DELAY_MS = Math.max(
   60,
   parseNumberEnv("GROUP_COMMAND_SUBBOT_MAX_DELAY_MS", 850) || 850
 );
+const GROUP_RESPONDER_NOTICE_ENABLED = parseBooleanEnv("GROUP_RESPONDER_NOTICE_ENABLED", true);
+const GROUP_RESPONDER_NOTICE_COOLDOWN_MS = Math.max(
+  60_000,
+  parseNumberEnv("GROUP_RESPONDER_NOTICE_COOLDOWN_MS", 10 * 60 * 1000) || 10 * 60 * 1000
+);
+const GROUP_RESPONDER_ENTRY_NOTICE_COOLDOWN_MS = Math.max(
+  2 * 60 * 1000,
+  parseNumberEnv("GROUP_RESPONDER_ENTRY_NOTICE_COOLDOWN_MS", 6 * 60 * 60 * 1000) ||
+    6 * 60 * 60 * 1000
+);
 
 function scheduleUsageStatsSave() {
   if (usageStatsSaveTimer) return;
@@ -3126,6 +3322,8 @@ function ensureBotState(config) {
     store: createStoreForBot(config.id),
     activeDownloadJobs: new Map(),
     downloadQueueCounter: 0,
+    groupResponderState: new Map(),
+    groupJoinNoticeCache: new Map(),
     persistedStateWriteTimer: null,
     persistedStateWritePending: false,
     socketRecoveryTimer: null,
@@ -7874,6 +8072,7 @@ async function handleIncomingMessages(botState, sock, messages) {
         raw,
         commandData
       );
+      await maybeAnnounceResponderTransition(botState, sock, raw, groupReservation);
       if (!groupReservation.allowed) {
         continue;
       }
@@ -8140,6 +8339,14 @@ async function iniciarInstanciaBot(config) {
           const meta = await botState.sock.groupMetadata(update.id);
           cacheGroupMetadata(botState, update.id, meta);
         } catch {}
+      }
+
+      const action = String(update?.action || "").trim().toLowerCase();
+      const selfJoined =
+        doesGroupUpdateIncludeSelf(botState.sock, update) &&
+        ["add", "invite", "join", "linked_group_join"].includes(action);
+      if (selfJoined && update?.id) {
+        await maybeAnnounceGroupEntry(botState, botState.sock, update.id, action);
       }
 
       await runGroupUpdateHooks(botState, botState.sock, update);

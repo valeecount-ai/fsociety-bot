@@ -507,9 +507,10 @@ async function getYtmp4Link(videoUrl, quality, fast = true) {
 
   const data = response.data;
   const remoteUrl =
+    data.direct_url ||
+    data.provider_direct_url ||
     data.download_url_full ||
     data.stream_url_full ||
-    data.direct_url ||
     data.url;
 
   if (!remoteUrl) {

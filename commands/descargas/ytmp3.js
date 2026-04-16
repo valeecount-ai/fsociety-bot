@@ -82,11 +82,6 @@ function cleanText(value = "") {
   return String(value || "").replace(/\s+/g, " ").trim();
 }
 
-function clipText(value = "", max = 90) {
-  const text = cleanText(value);
-  return text.length <= max ? text : `${text.slice(0, Math.max(1, max - 3))}...`;
-}
-
 function humanBytes(bytes = 0) {
   const size = Number(bytes || 0);
   if (!Number.isFinite(size) || size <= 0) return "N/D";
@@ -115,11 +110,6 @@ function normalizeMp3Name(name) {
   const parsed = path.parse(String(name || "").trim());
   const base = safeFileName(parsed.name || name || "youtube-audio");
   return `${base || "youtube-audio"}.mp3`;
-}
-
-function formatDuration(value = "") {
-  const text = cleanText(value);
-  return text || "Desconocida";
 }
 
 function extractTextFromMessage(message) {
@@ -162,20 +152,6 @@ function extractYouTubeUrl(text) {
     /https?:\/\/(?:www\.)?(?:youtube\.com|youtu\.be)\/[^\s]+/i
   );
   return match ? match[0].trim() : "";
-}
-
-function extractYouTubeId(value = "") {
-  const text = String(value || "");
-  const match = text.match(
-    /(?:youtu\.be\/|youtube\.com\/(?:watch\?(?:.*&)?v=|shorts\/|live\/|embed\/))([a-zA-Z0-9_-]{11})/i
-  );
-  return match?.[1] || "";
-}
-
-function buildYoutubeCoverUrl(videoUrl, fallback = "") {
-  const videoId = extractYouTubeId(videoUrl);
-  if (videoId) return `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`;
-  return /^https?:\/\//i.test(fallback) ? fallback : "";
 }
 
 function parseContentDispositionFileName(headerValue) {
@@ -227,41 +203,12 @@ function extractApiError(data, status) {
   );
 }
 
-async function getBuffer(url) {
-  const target = cleanText(url);
-  if (!target) return null;
-
-  try {
-    const response = await axios.get(target, {
-      responseType: "arraybuffer",
-      timeout: 20_000,
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/145 Safari/537.36",
-      },
-      httpAgent: HTTP_AGENT,
-      httpsAgent: HTTPS_AGENT,
-      maxRedirects: 5,
-      validateStatus: () => true,
-    });
-
-    if (response.status >= 400 || !response.data) return null;
-    const buffer = Buffer.from(response.data);
-    return buffer.length ? buffer : null;
-  } catch {
-    return null;
-  }
-}
-
 async function resolveInputToUrl(input) {
   const directUrl = extractYouTubeUrl(input);
   if (directUrl) {
     return {
       url: directUrl,
       title: "YouTube MP3",
-      duration: "",
-      author: "",
-      thumbnail: buildYoutubeCoverUrl(directUrl),
       searched: false,
     };
   }
@@ -279,9 +226,6 @@ async function resolveInputToUrl(input) {
   return {
     url: video.url,
     title: cleanText(video.title || "YouTube MP3"),
-    duration: cleanText(video.timestamp || ""),
-    author: cleanText(video.author?.name || video.author || ""),
-    thumbnail: buildYoutubeCoverUrl(video.url, video.thumbnail || ""),
     searched: true,
   };
 }
@@ -329,9 +273,7 @@ async function getYtmp3Data(videoUrl) {
     remoteUrl,
     title: cleanText(data.title || "YouTube MP3"),
     fileName: normalizeMp3Name(data.filename || data.title || "youtube-audio.mp3"),
-    thumbnail: cleanText(data.thumbnail || ""),
     cached: Boolean(data.cached),
-    request: data.request || {},
   };
 }
 
@@ -436,47 +378,16 @@ async function downloadYtmp3Fallback(videoUrl, preferredName) {
   }
 }
 
-async function sendAudioPreview(sock, from, quoted, data) {
-  const thumbBuffer = await getBuffer(data.thumbnail);
-
-  const caption = [
-    "╭━━━〔 🎧 *DVYER PLAYER* 〕━━━⬣",
-    "┃",
-    "┃ ✦ *VISTA PREVIA DEL AUDIO*",
-    "┃",
-    "┃ 🏷️ *Título:*",
-    `┃ ${clipText(data.title || "YouTube MP3", 75)}`,
-    "┃",
-    `┃ ⏱️ *Duración:* ${formatDuration(data.duration)}`,
-    data.author ? `┃ 👤 *Canal:* ${clipText(data.author, 40)}` : null,
-    `┃ 🚀 *Estado:* ${data.cached ? "En caché" : "Procesando"}`,
-    "┃",
-    "┃ ⌛ *Preparando tu audio...*",
-    "╰━━━━━━━━━━━━━━━━━━━━⬣",
-  ]
-    .filter(Boolean)
-    .join("\n");
-
-  if (thumbBuffer) {
-    return await sock.sendMessage(
-      from,
-      {
-        image: thumbBuffer,
-        caption,
-        ...global.channelInfo,
+async function react(sock, msg, emoji) {
+  try {
+    if (!msg?.key) return;
+    await sock.sendMessage(msg.key.remoteJid, {
+      react: {
+        text: emoji,
+        key: msg.key,
       },
-      quoted
-    );
-  }
-
-  return await sock.sendMessage(
-    from,
-    {
-      text: caption,
-      ...global.channelInfo,
-    },
-    quoted
-  );
+    });
+  } catch {}
 }
 
 async function sendRemoteMp3(sock, from, quoted, data) {
@@ -495,27 +406,12 @@ async function sendRemoteMp3(sock, from, quoted, data) {
     return "audio";
   } catch {}
 
-  const caption = [
-    "╭━━━〔 ✅ *DVYER PLAYER* 〕━━━⬣",
-    "┃",
-    "┃ ✦ *AUDIO LISTO PARA OÍR*",
-    "┃",
-    "┃ 🏷️ *Título:*",
-    `┃ ${clipText(data.title || data.fileName, 75)}`,
-    "┃",
-    `┃ ⚡ *Entrega:* ${data.cached ? "Caché rápida" : "Directa"}`,
-    "┃",
-    "┃ 🎵 *Disfrútalo*",
-    "╰━━━━━━━━━━━━━━━━━━━━⬣",
-  ].join("\n");
-
   await sock.sendMessage(
     from,
     {
       document: { url: data.remoteUrl },
       mimetype: "audio/mpeg",
       fileName: data.fileName,
-      caption,
       ...global.channelInfo,
     },
     quoted
@@ -525,21 +421,6 @@ async function sendRemoteMp3(sock, from, quoted, data) {
 }
 
 async function sendLocalMp3(sock, from, quoted, data) {
-  const caption = [
-    "╭━━━〔 ✅ *DVYER PLAYER* 〕━━━⬣",
-    "┃",
-    "┃ ✦ *AUDIO LISTO PARA OÍR*",
-    "┃",
-    "┃ 🏷️ *Título:*",
-    `┃ ${clipText(data.title || data.fileName, 75)}`,
-    "┃",
-    `┃ 💾 *Peso:* ${humanBytes(data.size)}`,
-    `┃ 🛟 *Entrega:* ${data.size <= AUDIO_AS_DOCUMENT_THRESHOLD ? "Audio local" : "Documento local"}`,
-    "┃",
-    "┃ 🎵 *Disfrútalo*",
-    "╰━━━━━━━━━━━━━━━━━━━━⬣",
-  ].join("\n");
-
   if (data.size <= AUDIO_AS_DOCUMENT_THRESHOLD) {
     try {
       await sock.sendMessage(
@@ -563,7 +444,6 @@ async function sendLocalMp3(sock, from, quoted, data) {
       document: { url: data.tempPath },
       mimetype: "audio/mpeg",
       fileName: data.fileName,
-      caption,
       ...global.channelInfo,
     },
     quoted
@@ -587,6 +467,7 @@ export default {
 
     try {
       cleanupOldFiles().catch(() => {});
+      await react(sock, msg, "🕓");
 
       const input = resolveUserInput(ctx);
       const identity = buildRateIdentity(
@@ -605,6 +486,7 @@ export default {
       });
 
       if (!limitState.ok) {
+        await react(sock, msg, "⚠️");
         return await sock.sendMessage(
           from,
           {
@@ -618,21 +500,11 @@ export default {
       const resolved = await resolveInputToUrl(input);
 
       if (!resolved?.url) {
+        await react(sock, msg, "❌");
         return await sock.sendMessage(
           from,
           {
-            text: [
-              "╭━━━〔 🎧 *DVYER PLAYER* 〕━━━⬣",
-              "┃",
-              "┃ ✦ *USO DEL COMANDO*",
-              "┃",
-              "┃ 📌 *.ytmp3 <link o nombre>*",
-              "┃ 📌 *.yta <link o nombre>*",
-              "┃ 📌 *.ytaudio <link o nombre>*",
-              "┃",
-              "┃ ⚡ *Entrega rápida desde DVYER API*",
-              "╰━━━━━━━━━━━━━━━━━━━━⬣",
-            ].join("\n"),
+            text: "Usa: .ytmp3 <link o nombre>",
             ...global.channelInfo,
           },
           quoted
@@ -643,7 +515,10 @@ export default {
         feature: "ytmp3",
         videoUrl: resolved.url,
       });
-      if (!downloadCharge?.ok) return;
+      if (!downloadCharge?.ok) {
+        await react(sock, msg, "❌");
+        return;
+      }
 
       const apiData = await runWithProviderCircuit(
         PROVIDER_NAME,
@@ -664,41 +539,22 @@ export default {
         }
       );
 
-      await sendAudioPreview(sock, from, quoted, {
-        title: apiData.title || resolved.title,
-        duration: resolved.duration,
-        author: resolved.author,
-        thumbnail: apiData.thumbnail || resolved.thumbnail,
-        cached: apiData.cached,
-      });
-
       try {
         await sendRemoteMp3(sock, from, quoted, {
           ...apiData,
           title: apiData.title || resolved.title,
         });
         sentSuccessfully = true;
+        await react(sock, msg, "✅");
         return;
       } catch {}
-
-      await sock.sendMessage(
-        from,
-        {
-          text: "⌛ El envío rápido falló. Usando respaldo local...",
-          ...global.channelInfo,
-        },
-        quoted
-      );
 
       const downloaded = await downloadYtmp3Fallback(resolved.url, apiData.fileName || resolved.title);
       tempPath = downloaded.tempPath;
 
-      await sendLocalMp3(sock, from, quoted, {
-        ...downloaded,
-        title: apiData.title || resolved.title,
-      });
-
+      await sendLocalMp3(sock, from, quoted, downloaded);
       sentSuccessfully = true;
+      await react(sock, msg, "✅");
     } catch (error) {
       console.error("YTMP3 ERROR:", error?.message || error);
 
@@ -708,6 +564,8 @@ export default {
           error: String(error?.message || error || "unknown_error"),
         });
       }
+
+      await react(sock, msg, "❌");
 
       const errorText =
         error?.code === "PROVIDER_CIRCUIT_OPEN"

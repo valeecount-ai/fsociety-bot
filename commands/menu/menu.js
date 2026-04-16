@@ -1,45 +1,56 @@
 import fs from "fs";
 import path from "path";
 
+let MENU_IMAGE_CACHE = null;
+let MENU_IMAGE_PATH_CACHE = "";
+
 function formatUptime(seconds) {
-  const h = Math.floor(seconds / 3600);
-  const m = Math.floor((seconds % 3600) / 60);
+  const total = Math.max(0, Math.floor(Number(seconds || 0)));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
   return `${h}h ${m}m`;
+}
+
+function cleanText(value = "") {
+  return String(value || "").replace(/\s+/g, " ").trim();
 }
 
 function getPrimaryPrefix(settings) {
   if (Array.isArray(settings?.prefix)) {
-    return settings.prefix.find((value) => String(value || "").trim()) || ".";
+    return settings.prefix.find((value) => cleanText(value)) || ".";
   }
 
-  return String(settings?.prefix || ".").trim() || ".";
+  return cleanText(settings?.prefix || ".") || ".";
 }
 
 function getPrefixLabel(settings) {
   if (Array.isArray(settings?.prefix)) {
-    const values = settings.prefix
-      .map((value) => String(value || "").trim())
-      .filter(Boolean);
-
+    const values = settings.prefix.map((value) => cleanText(value)).filter(Boolean);
     return values.length ? values.join(" | ") : ".";
   }
 
-  return String(settings?.prefix || ".").trim() || ".";
+  return cleanText(settings?.prefix || ".") || ".";
 }
 
 function normalizeCategoryLabel(value = "") {
-  return String(value || "")
-    .replace(/_/g, " ")
-    .trim()
-    .toUpperCase();
+  return cleanText(value).replace(/_/g, " ").toUpperCase();
 }
 
 function normalizeCategoryKey(value = "") {
-  const key = String(value || "").trim().toLowerCase();
+  const key = cleanText(value).toLowerCase();
   const aliases = {
     descarga: "descargas",
+    download: "descargas",
     grupo: "grupos",
+    group: "grupos",
+    tool: "herramientas",
+    tools: "herramientas",
+    search: "busqueda",
+    game: "juegos",
+    games: "juegos",
+    system: "sistema",
   };
+
   return aliases[key] || key;
 }
 
@@ -90,16 +101,12 @@ function getCategoryIcon(category = "") {
 }
 
 function getSubbotSlot(botId = "") {
-  const match = String(botId || "")
-    .trim()
-    .toLowerCase()
-    .match(/^subbot(\d{1,2})$/);
-
+  const match = cleanText(botId).toLowerCase().match(/^subbot(\d{1,2})$/);
   return match?.[1] ? Number.parseInt(match[1], 10) : 0;
 }
 
 function getMenuContext({ settings, botId = "", botLabel = "" }) {
-  const normalizedBotId = String(botId || "").trim().toLowerCase();
+  const normalizedBotId = cleanText(botId).toLowerCase();
 
   if (!normalizedBotId || normalizedBotId === "main") {
     return {
@@ -111,7 +118,7 @@ function getMenuContext({ settings, botId = "", botLabel = "" }) {
   const slot = getSubbotSlot(normalizedBotId);
   const subbotName =
     (slot >= 1 && Array.isArray(settings?.subbots) && settings.subbots[slot - 1]?.name) ||
-    String(botLabel || "").trim() ||
+    cleanText(botLabel) ||
     `Fsociety Subbot ${slot || 1}`;
 
   return {
@@ -131,12 +138,15 @@ function buildTopPanel({
 }) {
   return [
     `╭━━━〔 ${menuTitle} 〕━━━⬣`,
-    `┃ ✦ Bot activo: *${botLine || settings.botName || "BOT"}*`,
-    `┃ ✦ Owner: *${settings.ownerName || "Owner"}*`,
-    `┃ ✦ Prefijos: *${prefixLabel}*`,
-    `┃ ✦ Uptime: *${uptime}*`,
-    `┃ ✦ Categorias: *${totalCategories}*`,
-    `┃ ✦ Comandos: *${totalCommands}*`,
+    "┃",
+    `┃ 🤖 *Bot:* ${botLine || settings?.botName || "BOT"}`,
+    `┃ 👑 *Owner:* ${settings?.ownerName || "Owner"}`,
+    `┃ 🔰 *Prefijos:* ${prefixLabel}`,
+    `┃ ⏳ *Uptime:* ${uptime}`,
+    `┃ 🗂️ *Categorías:* ${totalCategories}`,
+    `┃ 📌 *Comandos:* ${totalCommands}`,
+    "┃",
+    "┃ ✦ *Selecciona el comando que quieras usar*",
     "╰━━━━━━━━━━━━━━━━━━━━━━⬣",
   ].join("\n");
 }
@@ -144,6 +154,7 @@ function buildTopPanel({
 function buildCategoryBlock(category, commands, primaryPrefix) {
   const icon = getCategoryIcon(category);
   const title = normalizeCategoryLabel(normalizeCategoryKey(category));
+
   const lines = [
     `╭─〔 ${icon} ${title} 〕`,
     ...commands.map((name) => `│ • \`${primaryPrefix}${name}\``),
@@ -156,39 +167,107 @@ function buildCategoryBlock(category, commands, primaryPrefix) {
 function buildFooter(primaryPrefix) {
   return [
     "╭─〔 NOTAS 〕",
-    `│ • Usa \`${primaryPrefix}herramientas\` para utilidades ordenadas`,
-    `│ • Usa \`${primaryPrefix}status\` para ver el estado del bot`,
-    `│ • Usa \`${primaryPrefix}owner\` si necesitas soporte directo`,
+    `│ • Usa \`${primaryPrefix}herramientas\` para utilidades`,
+    `│ • Usa \`${primaryPrefix}status\` para ver el estado`,
+    `│ • Usa \`${primaryPrefix}owner\` para soporte`,
     "╰────────────⬣",
   ].join("\n");
 }
 
 function resolveMenuImagePath() {
+  if (MENU_IMAGE_PATH_CACHE && fs.existsSync(MENU_IMAGE_PATH_CACHE)) {
+    return MENU_IMAGE_PATH_CACHE;
+  }
+
   const base = path.join(process.cwd(), "imagenes", "menu");
   const candidates = [`${base}.png`, `${base}.jpg`, `${base}.jpeg`, `${base}.webp`];
-  return candidates.find((filePath) => fs.existsSync(filePath)) || "";
+  const found = candidates.find((filePath) => fs.existsSync(filePath)) || "";
+
+  MENU_IMAGE_PATH_CACHE = found;
+  return found;
+}
+
+function getMenuImageBuffer() {
+  const imagePath = resolveMenuImagePath();
+  if (!imagePath) return null;
+
+  try {
+    const stat = fs.statSync(imagePath);
+    const cacheKey = `${imagePath}:${stat.mtimeMs}:${stat.size}`;
+
+    if (MENU_IMAGE_CACHE?.key === cacheKey && MENU_IMAGE_CACHE?.buffer) {
+      return MENU_IMAGE_CACHE.buffer;
+    }
+
+    const buffer = fs.readFileSync(imagePath);
+    MENU_IMAGE_CACHE = { key: cacheKey, buffer };
+    return buffer;
+  } catch {
+    return null;
+  }
+}
+
+async function react(sock, msg, emoji) {
+  try {
+    if (!msg?.key) return;
+    await sock.sendMessage(msg.key.remoteJid, {
+      react: {
+        text: emoji,
+        key: msg.key,
+      },
+    });
+  } catch {}
+}
+
+function collectCategories(comandos) {
+  const categorias = {};
+
+  for (const cmd of new Set(comandos.values())) {
+    const categoryRaw = cmd?.categoria || cmd?.category;
+    const commandRaw = cmd?.command || cmd?.commands;
+    if (!categoryRaw || !commandRaw) continue;
+
+    const category = normalizeCategoryKey(categoryRaw);
+    const principal =
+      cleanText(cmd?.name) ||
+      (Array.isArray(commandRaw) ? cleanText(commandRaw[0]) : cleanText(commandRaw));
+
+    if (!principal) continue;
+
+    if (!categorias[category]) categorias[category] = new Set();
+    categorias[category].add(principal.toLowerCase());
+  }
+
+  return categorias;
 }
 
 export default {
   command: ["menu"],
-  category: "menu",
+  categoria: "menu",
   description: "Menu principal con imagen",
 
   run: async ({ sock, msg, from, settings, comandos, botId, botLabel }) => {
     try {
+      await react(sock, msg, "📜");
+
       if (!comandos) {
-        return sock.sendMessage(
+        await react(sock, msg, "❌");
+        return await sock.sendMessage(
           from,
-          { text: "Error interno del menu.", ...global.channelInfo },
+          { text: "Error interno del menú.", ...global.channelInfo },
           { quoted: msg }
         );
       }
 
-      const imagePath = resolveMenuImagePath();
-      if (!imagePath) {
-        return sock.sendMessage(
+      const imageBuffer = getMenuImageBuffer();
+      if (!imageBuffer) {
+        await react(sock, msg, "❌");
+        return await sock.sendMessage(
           from,
-          { text: "Imagen del menu no encontrada en imagenes/menu.png.", ...global.channelInfo },
+          {
+            text: "Imagen del menú no encontrada en imagenes/menu.(png/jpg/jpeg/webp).",
+            ...global.channelInfo,
+          },
           { quoted: msg }
         );
       }
@@ -197,24 +276,14 @@ export default {
       const primaryPrefix = getPrimaryPrefix(settings);
       const prefixLabel = getPrefixLabel(settings);
       const menuContext = getMenuContext({ settings, botId, botLabel });
-      const categorias = {};
-
-      for (const cmd of new Set(comandos.values())) {
-        if (!cmd?.category || !cmd?.command) continue;
-
-        const category = normalizeCategoryKey(cmd.category);
-        const principal = cmd.name || (Array.isArray(cmd.command) ? cmd.command[0] : cmd.command);
-        if (!principal) continue;
-
-        if (!categorias[category]) categorias[category] = new Set();
-        categorias[category].add(String(principal).toLowerCase());
-      }
+      const categorias = collectCategories(comandos);
 
       const categoryNames = Object.keys(categorias).sort((a, b) => {
         const byOrder = getCategorySortIndex(a) - getCategorySortIndex(b);
         if (byOrder !== 0) return byOrder;
         return String(a).localeCompare(String(b));
       });
+
       const totalCommands = categoryNames.reduce(
         (sum, category) => sum + Array.from(categorias[category]).length,
         0
@@ -239,17 +308,20 @@ export default {
       await sock.sendMessage(
         from,
         {
-          image: fs.readFileSync(imagePath),
+          image: imageBuffer,
           caption: parts.join("\n\n").trim(),
           ...global.channelInfo,
         },
         { quoted: msg }
       );
+
+      await react(sock, msg, "✅");
     } catch (error) {
       console.error("MENU ERROR:", error);
+      await react(sock, msg, "❌");
       await sock.sendMessage(
         from,
-        { text: "Error al mostrar el menu.", ...global.channelInfo },
+        { text: "Error al mostrar el menú.", ...global.channelInfo },
         { quoted: msg }
       );
     }

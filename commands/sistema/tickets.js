@@ -31,6 +31,19 @@ function formatDate(value) {
   }
 }
 
+function extractWhatsAppNumber(jid = "") {
+  const raw = String(jid || "").trim();
+  if (!raw) return "Desconocido";
+
+  const cleaned = raw
+    .replace(/@s\.whatsapp\.net$/i, "")
+    .replace(/@lid$/i, "")
+    .replace(/@g\.us$/i, "");
+
+  const digits = cleaned.replace(/\D/g, "");
+  return digits || cleaned || "Desconocido";
+}
+
 function normalizeOwnerJids(settings = {}) {
   const values = [
     ...(Array.isArray(settings?.ownerNumbers) ? settings.ownerNumbers : []),
@@ -39,12 +52,14 @@ function normalizeOwnerJids(settings = {}) {
     settings?.ownerLid,
   ].filter(Boolean);
 
-  return [...new Set(
-    values
-      .map((value) => normalizeNumber(value))
-      .filter(Boolean)
-      .map((value) => `${value}@s.whatsapp.net`)
-  )];
+  return [
+    ...new Set(
+      values
+        .map((value) => normalizeNumber(value))
+        .filter(Boolean)
+        .map((value) => `${value}@s.whatsapp.net`)
+    ),
+  ];
 }
 
 async function react(sock, msg, emoji) {
@@ -59,8 +74,8 @@ async function react(sock, msg, emoji) {
   } catch {}
 }
 
-function findRecentDuplicateTicket(sender = "", text = "") {
-  const normalizedSender = cleanText(sender);
+function findRecentDuplicateTicket(senderJid = "", text = "") {
+  const normalizedSenderJid = cleanText(senderJid);
   const normalizedText = cleanText(text).toLowerCase();
   const now = Date.now();
 
@@ -68,7 +83,7 @@ function findRecentDuplicateTicket(sender = "", text = "") {
     .slice()
     .reverse()
     .find((item) => {
-      if (cleanText(item?.sender) !== normalizedSender) return false;
+      if (cleanText(item?.senderJid) !== normalizedSenderJid) return false;
       if (cleanText(item?.text).toLowerCase() !== normalizedText) return false;
       if (String(item?.status || "open").toLowerCase() === "closed") return false;
 
@@ -123,6 +138,7 @@ function buildOwnerTicketMessage(ticket) {
     `┃ 🎫 *ID:* #${ticket.id}`,
     `┃ 🤖 *Bot:* ${ticket.bot}`,
     `┃ 👤 *Usuario:* ${ticket.sender}`,
+    ticket.senderJid ? `┃ 🔗 *JID:* ${ticket.senderJid}` : null,
     ticket.pushName ? `┃ 🏷️ *Nombre:* ${ticket.pushName}` : null,
     `┃ 💬 *Chat:* ${ticket.chat}`,
     `┃ 👥 *Grupo:* ${ticket.isGroup ? "Sí" : "No"}`,
@@ -152,10 +168,11 @@ function buildTicketList(items = []) {
       "┃",
       `┃ #${item.id} • ${String(item.status || "open").toUpperCase()}`,
       `┃ 👤 ${item.sender}`,
+      item.senderJid ? `┃ 🔗 ${item.senderJid}` : null,
       `┃ 💬 ${item.chat}`,
       `┃ 🕒 ${formatDate(item.createdAt)}`,
       `┃ ✦ ${clipText(item.text, 120)}`,
-    ]),
+    ].filter(Boolean)),
     "╰━━━━━━━━━━━━━━━━━━━━⬣",
   ].join("\n");
 }
@@ -291,7 +308,8 @@ export default {
 
       const ticket = {
         id: Number(store.state.nextId || 1),
-        sender: String(sender || ""),
+        sender: extractWhatsAppNumber(sender || ""),
+        senderJid: String(sender || ""),
         pushName: cleanText(pushName || msg?.pushName || ""),
         chat: from,
         text,

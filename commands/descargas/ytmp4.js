@@ -31,6 +31,8 @@ const RATE_LIMIT_MAX = 5;
 const RATE_LIMIT_WINDOW_MS = 60_000;
 const PROVIDER_NAME = "dvyer_ytmp4";
 const TMP_FILE_MAX_AGE_MS = 15 * 60 * 1000;
+const DEFAULT_QUALITY = "360p";
+const FALLBACK_QUALITIES = ["360p", "240p", "144p"];
 
 async function ensureTmpDir() {
   await fsp.mkdir(TMP_DIR, { recursive: true });
@@ -78,6 +80,22 @@ function normalizeMp4Name(name) {
 function formatDuration(value = "") {
   const text = cleanText(value);
   return text || "Desconocida";
+}
+
+function normalizeQuality(value) {
+  const text = String(value || "").trim().toLowerCase();
+  if (!text) return DEFAULT_QUALITY;
+  if (text === "hd") return "720p";
+  if (text === "sd") return DEFAULT_QUALITY;
+  if (text === "best") return DEFAULT_QUALITY;
+  const match = text.match(/(\d{3,4})/);
+  const normalized = match ? `${match[1]}p` : DEFAULT_QUALITY;
+  return FALLBACK_QUALITIES.includes(normalized) ? normalized : DEFAULT_QUALITY;
+}
+
+function uniqueQualities(preferred) {
+  const list = [normalizeQuality(preferred), ...FALLBACK_QUALITIES];
+  return [...new Set(list)].filter(Boolean);
 }
 
 async function getBuffer(url) {
@@ -209,27 +227,18 @@ function extractYouTubeVideoId(urlValue = "") {
   return cleanText(fallbackMatch?.[1] || "");
 }
 
-function normalizeQuality(value) {
-  const text = String(value || "").trim().toLowerCase();
-  if (!text) return "360p";
-  if (text === "hd") return "720p";
-  if (text === "sd") return "360p";
-  if (text === "best") return "best";
-  const match = text.match(/(\d{3,4})/);
-  return match ? `${match[1]}p` : "360p";
-}
-
 function extractQualityAndQuery(input) {
   const tokens = cleanText(input).split(/\s+/).filter(Boolean);
-  let quality = "360p";
+  let quality = DEFAULT_QUALITY;
   let fast = true;
   const remaining = [];
 
   for (const token of tokens) {
     const lower = token.toLowerCase();
 
-    if (QUALITY_PATTERN.test(token) && quality === "360p") {
-      quality = token;
+    if (QUALITY_PATTERN.test(token) && quality === DEFAULT_QUALITY) {
+      const normalized = normalizeQuality(token);
+      quality = normalized || DEFAULT_QUALITY;
       continue;
     }
 
@@ -247,7 +256,7 @@ function extractQualityAndQuery(input) {
   }
 
   return {
-    quality: normalizeQuality(quality),
+    quality: quality || DEFAULT_QUALITY,
     query: remaining.join(" ").trim(),
     fast,
   };
@@ -331,13 +340,28 @@ async function getYtmp4Data(videoUrl, quality, fast = true) {
     remoteUrl,
     title: cleanText(data.title || "YouTube Video"),
     fileName: normalizeMp4Name(data.filename || data.title || "youtube-video.mp4"),
-    quality: cleanText(data.quality || data.quality_requested || quality || "360p"),
+    quality: cleanText(data.quality || data.quality_requested || quality || DEFAULT_QUALITY),
     thumbnail: cleanText(data.thumbnail || ""),
     cached: Boolean(data.cached),
     availableQualities: Array.isArray(data.available_qualities) ? data.available_qualities : [],
     expiresIn: Number(data.expires_in_hint_seconds || 0),
     request: data.request || {},
   };
+}
+
+async function getYtmp4DataWithFallback(videoUrl, preferredQuality, fast = true) {
+  let lastError = null;
+
+  for (const quality of uniqueQualities(preferredQuality)) {
+    try {
+      const data = await getYtmp4Data(videoUrl, quality, fast);
+      return { ...data, qualityUsed: quality };
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  throw lastError || new Error("No se pudo obtener el video.");
 }
 
 async function downloadRemoteMp4(remoteUrl, preferredName) {
@@ -403,16 +427,20 @@ async function sendVideoPreview(sock, from, quoted, data) {
   const thumbBuffer = await getBuffer(data.thumbnail);
 
   const caption = [
-    "╭━━━━━━━━━━━━━━━╮",
-    "┃   *🎬 DVYER YTMP4*",
-    "╰━━━━━━━━━━━━━━━╯",
-    `🎞️ *Título:* ${clipText(data.title || "YouTube Video", 85)}`,
-    `⏱️ *Duración:* ${formatDuration(data.duration)}`,
-    `📺 *Calidad:* ${data.quality || "360p"}`,
-    data.author ? `👤 *Canal:* ${clipText(data.author, 50)}` : null,
-    data.cached ? "🚀 *Estado:* En caché" : "📡 *Estado:* Procesando",
-    "",
-    "⌛ *Preparando tu video...*",
+    "╭━━━〔 🎬 *DVYER PLAYER* 〕━━━⬣",
+    "┃",
+    "┃ ✦ *VISTA PREVIA DEL VIDEO*",
+    "┃",
+    "┃ 🏷️ *Título:*",
+    `┃ ${clipText(data.title || "YouTube Video", 75)}`,
+    "┃",
+    `┃ ⏱️ *Duración:* ${formatDuration(data.duration)}`,
+    `┃ 📺 *Calidad:* ${data.quality || DEFAULT_QUALITY}`,
+    data.author ? `┃ 👤 *Canal:* ${clipText(data.author, 40)}` : null,
+    `┃ 🚀 *Estado:* ${data.cached ? "En caché" : "Procesando"}`,
+    "┃",
+    "┃ ⌛ *Preparando tu video...*",
+    "╰━━━━━━━━━━━━━━━━━━━━⬣",
   ]
     .filter(Boolean)
     .join("\n");
@@ -443,14 +471,18 @@ async function sendRemoteMp4(sock, from, quoted, data) {
   const thumbBuffer = await getBuffer(data.thumbnail);
 
   const caption = [
-    "╭━━━━━━━━━━━━━━━╮",
-    "┃   *✅ DVYER YTMP4*",
-    "╰━━━━━━━━━━━━━━━╯",
-    `🎞️ *Título:* ${clipText(data.title || data.fileName, 80)}`,
-    `📺 *Calidad:* ${data.quality || "360p"}`,
-    data.cached ? "🚀 *Entrega:* Caché rápida" : "📡 *Entrega:* Directa",
-    "",
-    "🎉 *Aquí tienes tu video*",
+    "╭━━━〔 ✅ *DVYER PLAYER* 〕━━━⬣",
+    "┃",
+    "┃ ✦ *VIDEO LISTO PARA VER*",
+    "┃",
+    "┃ 🏷️ *Título:*",
+    `┃ ${clipText(data.title || data.fileName, 75)}`,
+    "┃",
+    `┃ 📺 *Calidad:* ${data.quality || DEFAULT_QUALITY}`,
+    `┃ ⚡ *Entrega:* ${data.cached ? "Caché rápida" : "Directa"}`,
+    "┃",
+    "┃ 🍿 *Disfrútalo*",
+    "╰━━━━━━━━━━━━━━━━━━━━⬣",
   ]
     .filter(Boolean)
     .join("\n");
@@ -491,15 +523,19 @@ async function sendLocalMp4(sock, from, quoted, data) {
   const thumbBuffer = await getBuffer(data.thumbnail);
 
   const caption = [
-    "╭━━━━━━━━━━━━━━━╮",
-    "┃   *✅ DVYER YTMP4*",
-    "╰━━━━━━━━━━━━━━━╯",
-    `🎞️ *Título:* ${clipText(data.title || data.fileName, 80)}`,
-    `📺 *Calidad:* ${data.quality || "360p"}`,
-    data.size ? `💾 *Peso:* ${humanBytes(data.size)}` : null,
-    "🛟 *Entrega:* Respaldo local",
-    "",
-    "🎉 *Aquí tienes tu video*",
+    "╭━━━〔 ✅ *DVYER PLAYER* 〕━━━⬣",
+    "┃",
+    "┃ ✦ *VIDEO LISTO PARA VER*",
+    "┃",
+    "┃ 🏷️ *Título:*",
+    `┃ ${clipText(data.title || data.fileName, 75)}`,
+    "┃",
+    `┃ 📺 *Calidad:* ${data.quality || DEFAULT_QUALITY}`,
+    data.size ? `┃ 💾 *Peso:* ${humanBytes(data.size)}` : null,
+    "┃ 🛟 *Entrega:* Respaldo local",
+    "┃",
+    "┃ 🍿 *Disfrútalo*",
+    "╰━━━━━━━━━━━━━━━━━━━━⬣",
   ]
     .filter(Boolean)
     .join("\n");
@@ -540,7 +576,7 @@ async function sendLocalMp4(sock, from, quoted, data) {
 
 export default {
   command: ["ytmp4", "ytv", "ytvideo"],
-  category: "descarga",
+  categoria: "descarga",
 
   run: async (ctx) => {
     const { sock, from } = ctx;
@@ -590,13 +626,16 @@ export default {
           from,
           {
             text: [
-              "╭━━━━━━━━━━━━━━━╮",
-              "┃   *🎬 DVYER YTMP4*",
-              "╰━━━━━━━━━━━━━━━╯",
-              "📌 *Uso:* .ytmp4 <link o nombre>",
-              "📌 *Uso:* .ytmp4 720p <link o nombre>",
-              "📌 *Uso:* .ytmp4 fast <link o nombre>",
-              "📌 *Uso:* .ytmp4 nofast <link o nombre>",
+              "╭━━━〔 🎬 *DVYER PLAYER* 〕━━━⬣",
+              "┃",
+              "┃ ✦ *USO DEL COMANDO*",
+              "┃",
+              "┃ 📌 *.ytmp4 <link o nombre>*",
+              "┃ 📌 *.ytmp4 fast <link o nombre>*",
+              "┃ 📌 *.ytmp4 nofast <link o nombre>*",
+              "┃",
+              "┃ 🎚️ *Calidad automática:* 360p → 240p → 144p",
+              "╰━━━━━━━━━━━━━━━━━━━━⬣",
             ].join("\n"),
             ...global.channelInfo,
           },
@@ -612,7 +651,7 @@ export default {
 
       const apiData = await runWithProviderCircuit(
         PROVIDER_NAME,
-        () => getYtmp4Data(resolved.url, quality, fast),
+        () => getYtmp4DataWithFallback(resolved.url, quality || DEFAULT_QUALITY, fast),
         {
           failureThreshold: 4,
           cooldownMs: 90_000,
@@ -632,7 +671,7 @@ export default {
       await sendVideoPreview(sock, from, quoted, {
         title: apiData.title || resolved.title,
         duration: resolved.duration,
-        quality: apiData.quality || quality,
+        quality: apiData.quality || apiData.qualityUsed || DEFAULT_QUALITY,
         thumbnail: apiData.thumbnail || resolved.thumbnail,
         author: resolved.author,
         cached: apiData.cached,
@@ -642,7 +681,7 @@ export default {
         await sendRemoteMp4(sock, from, quoted, {
           ...apiData,
           title: apiData.title || resolved.title,
-          quality: apiData.quality || quality,
+          quality: apiData.quality || apiData.qualityUsed || DEFAULT_QUALITY,
           thumbnail: apiData.thumbnail || resolved.thumbnail,
         });
         sentSuccessfully = true;
@@ -664,7 +703,7 @@ export default {
       await sendLocalMp4(sock, from, quoted, {
         ...downloaded,
         title: apiData.title || resolved.title,
-        quality: apiData.quality || quality,
+        quality: apiData.quality || apiData.qualityUsed || DEFAULT_QUALITY,
         thumbnail: apiData.thumbnail || resolved.thumbnail,
       });
 

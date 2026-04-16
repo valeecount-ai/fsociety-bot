@@ -112,6 +112,23 @@ function buildBar(percent, size = 16) {
   return "█".repeat(filled) + "░".repeat(Math.max(0, total - filled));
 }
 
+function getFetch() {
+  if (typeof fetch === "function") return fetch.bind(globalThis);
+  throw new Error("Este entorno no tiene fetch disponible.");
+}
+
+async function react(sock, msg, emoji) {
+  try {
+    if (!msg?.key) return;
+    await sock.sendMessage(msg.key.remoteJid, {
+      react: {
+        text: emoji,
+        key: msg.key,
+      },
+    });
+  } catch {}
+}
+
 async function readResponseBytes(response) {
   if (!response?.body?.getReader) {
     const payload = await response.arrayBuffer();
@@ -160,6 +177,7 @@ async function readResponseBytesLimited(response, limitBytes) {
 }
 
 async function runTimedFetch(url, options = {}, timeoutMs = REQUEST_TIMEOUT_MS) {
+  const doFetch = getFetch();
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   const startedAt = process.hrtime.bigint();
@@ -170,7 +188,7 @@ async function runTimedFetch(url, options = {}, timeoutMs = REQUEST_TIMEOUT_MS) 
       ...(options.headers || {}),
     };
 
-    const response = await fetch(url, {
+    const response = await doFetch(url, {
       ...options,
       headers,
       signal: controller.signal,
@@ -229,7 +247,7 @@ async function measurePing() {
   return {
     samples,
     averageMs: average(samples),
-    bestMs: Math.min(...samples),
+    bestMs: samples.length ? Math.min(...samples) : 0,
     jitterMs: stdDev(samples),
   };
 }
@@ -356,55 +374,56 @@ function buildResultMessage(result, modeLabel = "NORMAL", contactText = "") {
   const ul = parseMbps(result?.upload?.speedLabel);
   const ping = Number(result?.ping?.averageMs || 0);
   const jitter = Number(result?.ping?.jitterMs || 0);
+  const bestPing = Number(result?.ping?.bestMs || 0);
 
   const dlPct = clampNumber((dl / 300) * 100, 0, 100);
   const ulPct = clampNumber((ul / 150) * 100, 0, 100);
 
   const lines = [
-    "⚡ *SPEEDTEST COMPLETADO*",
-    "",
-    `🧪 Modo: *${modeLabel}*`,
-    `📥 Descarga: *${result?.download?.speedLabel || "0.00 Mbps"}*`,
-    `${buildBar(dlPct)} ${dlPct.toFixed(0)}%`,
-    "",
-    `📤 Subida: *${result?.upload?.speedLabel || "0.00 Mbps"}*`,
-    `${buildBar(ulPct)} ${ulPct.toFixed(0)}%`,
-    "",
-    `📶 Ping: *${formatMs(ping)}*`,
-    `〰️ Jitter: *${formatMs(jitter)}*`,
-    "",
-    `🌐 Proveedores: DL ${result?.download?.provider || "?"} | UL ${result?.upload?.provider || "?"}`,
-    `⏱️ Duración total: *${formatMs(totalTimeMs)}*`,
-    `📊 Muestras de ping: *${PING_SAMPLES}*`,
-  ];
+    "╭━━━〔 ⚡ *SPEEDTEST FSOCIETY* 〕━━━⬣",
+    "┃",
+    `┃ 🧪 *Modo:* ${modeLabel}`,
+    `┃ 📥 *Descarga:* ${result?.download?.speedLabel || "0.00 Mbps"}`,
+    `┃ ${buildBar(dlPct)} ${dlPct.toFixed(0)}%`,
+    "┃",
+    `┃ 📤 *Subida:* ${result?.upload?.speedLabel || "0.00 Mbps"}`,
+    `┃ ${buildBar(ulPct)} ${ulPct.toFixed(0)}%`,
+    "┃",
+    `┃ 📶 *Ping:* ${formatMs(ping)}`,
+    `┃ ⚡ *Mejor ping:* ${formatMs(bestPing)}`,
+    `┃ 〰️ *Jitter:* ${formatMs(jitter)}`,
+    "┃",
+    `┃ 🌐 *DL:* ${result?.download?.provider || "?"}`,
+    `┃ 🌐 *UL:* ${result?.upload?.provider || "?"}`,
+    `┃ ⏱️ *Duración:* ${formatMs(totalTimeMs)}`,
+    `┃ 📊 *Muestras:* ${PING_SAMPLES}`,
+    contactText ? `┃ 👤 *Owner:* ${contactText}` : null,
+    result?.download?.ok === false
+      ? `┃ ⚠️ *Error DL:* ${result.download.error || "desconocido"}`
+      : null,
+    result?.upload?.ok === false
+      ? `┃ ⚠️ *Error UL:* ${result.upload.error || "desconocido"}`
+      : null,
+    "╰━━━━━━━━━━━━━━━━━━━━━━⬣",
+  ]
+    .filter(Boolean)
+    .join("\n");
 
-  if (contactText) {
-    lines.push(`👤 Owner: *${contactText}*`);
-  }
-
-  if (result?.download?.ok === false) {
-    lines.push(`⚠️ Error descarga: ${result.download.error || "desconocido"}`);
-  }
-
-  if (result?.upload?.ok === false) {
-    lines.push(`⚠️ Error subida: ${result.upload.error || "desconocido"}`);
-  }
-
-  return lines.join("\n");
+  return lines;
 }
 
 function buildErrorMessage(error, contactText = "") {
   const message = String(error?.message || error || "Error desconocido");
-  const lines = [
-    "❌ *Speedtest no se completó*",
-    `Motivo: ${message}`,
-  ];
 
-  if (contactText) {
-    lines.push(`👤 Owner: *${contactText}*`);
-  }
-
-  return lines.join("\n");
+  return [
+    "╭━━━〔 ❌ *SPEEDTEST FALLÓ* 〕━━━⬣",
+    "┃",
+    `┃ Motivo: ${message}`,
+    contactText ? `┃ Owner: ${contactText}` : null,
+    "╰━━━━━━━━━━━━━━━━━━━━━━⬣",
+  ]
+    .filter(Boolean)
+    .join("\n");
 }
 
 function resolveMode(args = []) {
@@ -418,9 +437,9 @@ function resolveMode(args = []) {
     };
   }
 
-  if (["lite", "rapido", "fast"].includes(mode)) {
+  if (["lite", "rapido", "rápido", "fast"].includes(mode)) {
     return {
-      modeLabel: "RAPIDO",
+      modeLabel: "RÁPIDO",
       downloadBytes: 8_000_000,
       uploadBytes: 2_000_000,
     };
@@ -434,9 +453,8 @@ function resolveMode(args = []) {
 }
 
 export default {
-  name: "speedtest",
   command: ["speedtest"],
-  category: "sistema",
+  categoria: "sistema",
   description: "Mide ping, descarga y subida del internet del bot",
 
   run: async ({ sock, msg, from, args = [], settings = {} }) => {
@@ -454,21 +472,29 @@ export default {
     const { modeLabel, downloadBytes, uploadBytes } = resolveMode(args);
     const ownerName = buildOwnerContact(settings);
 
-    await sock.sendMessage(
-      from,
-      {
-        text: `⚡ Iniciando speedtest *${modeLabel}*...\n👤 Owner: *${ownerName}*`,
-        ...global.channelInfo,
-      },
-      { quoted: msg }
-    );
-
-    activeSpeedtest = executeSpeedtest({ downloadBytes, uploadBytes });
-
     try {
+      await react(sock, msg, "⚡");
+
+      await sock.sendMessage(
+        from,
+        {
+          text: [
+            "╭━━━〔 ⚡ *INICIANDO SPEEDTEST* 〕━━━⬣",
+            "┃",
+            `┃ 🧪 *Modo:* ${modeLabel}`,
+            `┃ 👤 *Owner:* ${ownerName}`,
+            "┃ ⏳ Espera a que termine la prueba...",
+            "╰━━━━━━━━━━━━━━━━━━━━━━⬣",
+          ].join("\n"),
+          ...global.channelInfo,
+        },
+        { quoted: msg }
+      );
+
+      activeSpeedtest = executeSpeedtest({ downloadBytes, uploadBytes });
       const result = await activeSpeedtest;
 
-      return sock.sendMessage(
+      await sock.sendMessage(
         from,
         {
           text: buildResultMessage(result, modeLabel, ownerName),
@@ -476,10 +502,12 @@ export default {
         },
         { quoted: msg }
       );
+
+      await react(sock, msg, "✅");
     } catch (error) {
       console.error("SPEEDTEST ERROR:", error);
 
-      return sock.sendMessage(
+      await sock.sendMessage(
         from,
         {
           text: buildErrorMessage(error, ownerName),
@@ -487,6 +515,8 @@ export default {
         },
         { quoted: msg }
       );
+
+      await react(sock, msg, "❌");
     } finally {
       activeSpeedtest = null;
     }

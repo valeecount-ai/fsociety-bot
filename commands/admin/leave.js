@@ -2,7 +2,7 @@ import { getQuoted } from "./_shared.js";
 
 export default {
   name: "leave",
-  command: ["leave", "salirgrupo"],
+  command: ["salir", "salirgrupo"],
   category: "admin",
   description: "Hace que el bot salga del grupo actual",
   groupOnly: true,

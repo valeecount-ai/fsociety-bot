@@ -8,7 +8,7 @@ import axios from "axios";
 import yts from "yt-search";
 import { pipeline } from "stream/promises";
 import { randomUUID } from "crypto";
-import { buildDvyerUrl } from "../../lib/api-manager.js";
+import { buildDvyerUrl, withDvyerApiKey } from "../../lib/api-manager.js";
 import { chargeDownloadRequest, refundDownloadCharge } from "../economia/download-access.js";
 import {
   buildRateIdentity,
@@ -303,6 +303,7 @@ async function getYtmp4Data(videoUrl, quality, fast = true) {
       url: videoUrl,
       quality,
       fast,
+      ...withDvyerApiKey(),
     },
     headers: {
       "User-Agent":

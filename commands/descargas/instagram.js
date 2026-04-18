@@ -4,10 +4,11 @@ import os from "os";
 import axios from "axios";
 import { pipeline } from "stream/promises";
 import { spawn } from "child_process";
+import { getDvyerBaseUrl, withDvyerApiKey } from "../../lib/api-manager.js";
 import { bindAbort, buildAbortError, throwIfAborted } from "../../lib/command-abort.js";
 import { chargeDownloadRequest, refundDownloadCharge } from "../economia/download-access.js";
 
-const API_BASE = "https://dv-yer-api.online";
+const API_BASE = getDvyerBaseUrl();
 const API_INSTAGRAM_URL = `${API_BASE}/instagram`;
 
 const COOLDOWN_TIME = 0;
@@ -139,7 +140,7 @@ async function apiGet(url, params, timeout = REQUEST_TIMEOUT, options = {}) {
   try {
     response = await axios.get(url, {
       timeout,
-      params,
+      params: withDvyerApiKey(params),
       signal,
       validateStatus: () => true,
     });
@@ -209,6 +210,7 @@ async function downloadInstagramFile(postUrl, pick, outputPath, options = {}) {
         url: postUrl,
         pick,
         lang: "es",
+        ...withDvyerApiKey(),
       },
       headers: {
         "User-Agent":

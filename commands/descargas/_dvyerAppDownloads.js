@@ -3,7 +3,7 @@ import path from "path";
 import os from "os";
 import axios from "axios";
 import { pipeline } from "stream/promises";
-import { getDvyerBaseUrl } from "../../lib/api-manager.js";
+import { appendDvyerApiKeyToUrl, getDvyerBaseUrl, withDvyerApiKey } from "../../lib/api-manager.js";
 import { chargeDownloadRequest, refundDownloadCharge } from "../economia/download-access.js";
 
 const LEGACY_DVYER_BASE_URL = "https://dv-yer-api.online";
@@ -346,7 +346,7 @@ async function readStreamToText(stream) {
 async function apiGet(url, params, timeout = SEARCH_TIMEOUT) {
   const response = await axios.get(url, {
     timeout,
-    params,
+    params: withDvyerApiKey(params),
     validateStatus: () => true,
   });
 
@@ -437,7 +437,7 @@ async function requestDownloadMeta(input, config, options = {}) {
 }
 
 async function downloadAbsoluteFile(downloadUrl, outputPath) {
-  const response = await axios.get(downloadUrl, {
+  const response = await axios.get(appendDvyerApiKeyToUrl(downloadUrl), {
     responseType: "stream",
     timeout: REQUEST_TIMEOUT,
     maxRedirects: 5,

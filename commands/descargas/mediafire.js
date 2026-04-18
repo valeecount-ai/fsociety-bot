@@ -3,9 +3,10 @@ import path from "path";
 import os from "os";
 import axios from "axios";
 import { pipeline } from "stream/promises";
+import { getDvyerBaseUrl, withDvyerApiKey } from "../../lib/api-manager.js";
 import { chargeDownloadRequest, refundDownloadCharge } from "../economia/download-access.js";
 
-const API_BASE = "https://dvyer-api.onrender.com";
+const API_BASE = getDvyerBaseUrl();
 const API_MEDIAFIRE_URL = `${API_BASE}/mediafire`;
 const COOLDOWN_TIME = 0;
 const REQUEST_TIMEOUT = 120000;
@@ -166,7 +167,7 @@ async function readStreamToText(stream) {
 async function apiGet(url, params, timeout = 45000) {
   const response = await axios.get(url, {
     timeout,
-    params,
+    params: withDvyerApiKey(params),
     validateStatus: () => true,
   });
 
@@ -208,6 +209,7 @@ async function downloadMediafireFile(fileUrl, outputPath) {
     params: {
       mode: "file",
       url: fileUrl,
+      ...withDvyerApiKey(),
     },
     headers: {
       "User-Agent":

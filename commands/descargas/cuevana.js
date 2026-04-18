@@ -4,7 +4,7 @@ import os from "os";
 import axios from "axios";
 import { pipeline } from "stream/promises";
 import { randomUUID } from "crypto";
-import { getDvyerBaseUrl } from "../../lib/api-manager.js";
+import { getDvyerBaseUrl, withDvyerApiKey } from "../../lib/api-manager.js";
 
 const RESULT_LIMIT = 10;
 const DEFAULT_TIMEOUT_MS = 20000;
@@ -46,7 +46,8 @@ function buildApiUrl(endpoint, params = {}) {
   const full =
     !suffix ? base : suffix.startsWith("/") ? `${base}${suffix}` : `${base}/${suffix}`;
   const url = new URL(full);
-  for (const [key, value] of Object.entries(params)) {
+  const authParams = withDvyerApiKey(params);
+  for (const [key, value] of Object.entries(authParams)) {
     if (value === undefined || value === null || value === "") continue;
     url.searchParams.set(key, String(value));
   }

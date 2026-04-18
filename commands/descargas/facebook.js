@@ -3,9 +3,10 @@ import path from "path";
 import os from "os";
 import axios from "axios";
 import { pipeline } from "stream/promises";
+import { getDvyerBaseUrl, withDvyerApiKey } from "../../lib/api-manager.js";
 import { chargeDownloadRequest, refundDownloadCharge } from "../economia/download-access.js";
 
-const API_BASE = "https://dv-yer-api.online";
+const API_BASE = getDvyerBaseUrl();
 const API_FACEBOOK_URL = `${API_BASE}/facebook`;
 
 const VIDEO_QUALITY = "auto";
@@ -134,7 +135,7 @@ async function readStreamToText(stream) {
 async function apiGet(url, params, timeout = 45000) {
   const response = await axios.get(url, {
     timeout,
-    params,
+    params: withDvyerApiKey(params),
     validateStatus: () => true,
   });
 
@@ -175,6 +176,7 @@ async function downloadFacebookVideo(videoUrl, outputPath) {
       mode: "file",
       quality: VIDEO_QUALITY,
       url: videoUrl,
+      ...withDvyerApiKey(),
     },
     headers: {
       "User-Agent":

@@ -3,7 +3,7 @@ import path from "path";
 import os from "os";
 import axios from "axios";
 import { pipeline } from "stream/promises";
-import { buildDvyerUrl, getDvyerBaseUrl } from "../../lib/api-manager.js";
+import { buildDvyerUrl, getDvyerBaseUrl, withDvyerApiKey } from "../../lib/api-manager.js";
 import { chargeDownloadRequest, refundDownloadCharge } from "../economia/download-access.js";
 
 const API_MEGA_URL = buildDvyerUrl("/mega");
@@ -167,7 +167,7 @@ async function readStreamToText(stream) {
 async function apiGet(url, params, timeout = 45000) {
   const response = await axios.get(url, {
     timeout,
-    params,
+    params: withDvyerApiKey(params),
     validateStatus: () => true,
   });
 
@@ -210,6 +210,7 @@ async function downloadMegaFile(fileUrl, outputPath) {
     params: {
       mode: "file",
       url: fileUrl,
+      ...withDvyerApiKey(),
     },
     headers: {
       "User-Agent":

@@ -4,10 +4,10 @@ import os from "os";
 import axios from "axios";
 import { pipeline } from "stream/promises";
 import { spawn } from "child_process";
+import { buildDvyerUrl, withDvyerApiKey } from "../../lib/api-manager.js";
 
 // Configuración
-const API_BASE_URL = "https://dv-yer-api.online";
-const API_SPOTIFY_PATH = "/spotify";
+const API_SPOTIFY_URL = buildDvyerUrl("/spotify");
 const TMP_DIR = path.join(os.tmpdir(), "spotify-downloads");
 const AUDIO_QUALITY = "128k";
 const REQUEST_TIMEOUT = 120000;
@@ -185,12 +185,12 @@ async function searchSpotifyTracks(query, limit = 10) {
     console.log(`[SPOTIFY] Buscando: ${cleanQuery}`);
 
     // Usar modo link directamente con q como parámetro
-    const response = await axios.get(`${API_BASE_URL}${API_SPOTIFY_PATH}`, {
-      params: {
+    const response = await axios.get(API_SPOTIFY_URL, {
+      params: withDvyerApiKey({
         q: cleanQuery,
         mode: "link",
         lang: "es3",
-      },
+      }),
       timeout: REQUEST_TIMEOUT,
       headers: {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -205,7 +205,15 @@ async function searchSpotifyTracks(query, limit = 10) {
       // Si falla con q, intentar de otra forma
       console.log(`[SPOTIFY] Intentando con parámetros alternativos...`);
       
-      const response2 = await axios.get(`${API_BASE_URL}${API_SPOTIFY_PATH}?q=${encodeURIComponent(cleanQuery)}&mode=link&lang=es3`, {
+      const fallbackQuery = new URLSearchParams(
+        withDvyerApiKey({
+          q: cleanQuery,
+          mode: "link",
+          lang: "es3",
+        })
+      ).toString();
+      const separator = API_SPOTIFY_URL.includes("?") ? "&" : "?";
+      const response2 = await axios.get(`${API_SPOTIFY_URL}${separator}${fallbackQuery}`, {
         timeout: REQUEST_TIMEOUT,
         headers: {
           "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -289,8 +297,8 @@ async function getSpotifyDownloadInfo(input) {
       params.q = cleanInput;
     }
 
-    const response = await axios.get(`${API_BASE_URL}${API_SPOTIFY_PATH}`, {
-      params,
+    const response = await axios.get(API_SPOTIFY_URL, {
+      params: withDvyerApiKey(params),
       timeout: REQUEST_TIMEOUT,
       headers: {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",

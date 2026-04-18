@@ -4,9 +4,10 @@ import os from "os";
 import axios from "axios";
 import { pipeline } from "stream/promises";
 import { randomUUID } from "crypto";
+import { getDvyerBaseUrl, withDvyerApiKey } from "../../lib/api-manager.js";
 import { chargeDownloadRequest, refundDownloadCharge } from "../economia/download-access.js";
 
-const API_BASE = "https://dv-yer-api.online";
+const API_BASE = getDvyerBaseUrl();
 const API_TIKTOK_URL = `${API_BASE}/ttdlmp4`;
 
 const COOLDOWN_TIME = 0;
@@ -223,7 +224,7 @@ async function readStreamToText(stream) {
 async function apiGet(url, params, timeout = REQUEST_TIMEOUT) {
   const response = await axios.get(url, {
     timeout,
-    params,
+    params: withDvyerApiKey(params),
     validateStatus: () => true,
   });
 
@@ -301,6 +302,7 @@ async function downloadTikTokViaApi(videoUrl, fileName, qualityHint, directUrl =
       quality: qualityHint,
       lang: API_LANG,
       url: videoUrl,
+      ...withDvyerApiKey(),
     };
   }
 
